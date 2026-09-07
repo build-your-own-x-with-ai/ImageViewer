@@ -20,34 +20,34 @@
 - [x] `docs/requirements.md`
 - [x] `docs/design.md`
 - [x] `docs/plan.md`
-- [ ] `docs/testing.md`
+- [x] `docs/testing.md`
 
 ### core 层
-- [ ] `byte_reader.dart` —— 大小端读取 + 越界检查
-- [ ] `bit_reader_msb.dart` —— JPEG 用，含 `0xFF00` 字节填充处理
-- [ ] `bit_reader_lsb.dart` —— deflate / VP8L 用
-- [ ] `rgba_image.dart` —— 统一像素容器 + 元数据
-- [ ] `image_decoder.dart` —— 解码器接口
-- [ ] `decoder_registry.dart` —— 魔数嗅探分发
-- [ ] `errors.dart`
-- [ ] core 层单测
+- [x] `byte_reader.dart` —— 大小端读取 + 越界检查
+- [x] `bit_reader_msb.dart` —— JPEG 用，含 `0xFF00` 字节填充处理
+- [x] `bit_reader_lsb.dart` —— deflate / VP8L 用
+- [x] `rgba_image.dart` —— 统一像素容器 + 元数据
+- [x] `image_decoder.dart` —— 解码器接口
+- [x] `decoder_registry.dart` —— 魔数嗅探分发
+- [x] `errors.dart`
+- [x] core 层单测（67 个）
 
 ### BMP
-- [ ] 头部解析：CORE(12) / INFO(40) / V4(108) / V5(124)
-- [ ] 1 / 4 / 8 bpp 调色板
-- [ ] 16 bpp（RGB555 与 `BI_BITFIELDS` 任意掩码）
-- [ ] 24 / 32 bpp
-- [ ] RLE4 / RLE8 游程解码
-- [ ] 自底向上与自顶向下（负 height）
-- [ ] 行 4 字节对齐
-- [ ] 测试 + `docs/formats/bmp.md`
+- [x] 头部解析：CORE(12) / INFO(40) / V2(52) / V3(56) / V4(108) / V5(124)
+- [x] 1 / 2 / 4 / 8 bpp 调色板（2bpp 是 Windows CE 的扩展，顺手支持）
+- [x] 16 bpp（RGB555 / RGB565 / 4-4-4-4 / 任意 `BI_BITFIELDS` 掩码）
+- [x] 24 / 32 bpp（含 32bpp alpha 的启发式判断）
+- [x] RLE4 / RLE8 游程解码（含绝对模式填充与增量跳转）
+- [x] 自底向上与自顶向下（负 height）
+- [x] 行 4 字节对齐
+- [x] 测试（76 个）+ `docs/formats/bmp.md`
 
 ### PNM
-- [ ] P1 / P2 / P3（ASCII）
-- [ ] P4 / P5 / P6（二进制）
-- [ ] 注释与任意空白的词法处理
-- [ ] maxval 1–65535（含 16 位降 8 位）
-- [ ] 测试 + `docs/formats/pnm.md`
+- [x] P1 / P2 / P3（ASCII）
+- [x] P4 / P5 / P6（二进制）
+- [x] 注释与任意空白的词法处理
+- [x] maxval 1–65535（含 16 位降 8 位）
+- [x] 测试（38 个）+ `docs/formats/pnm.md`
 
 ### YUV
 - [ ] `YuvFormat` 布局描述子
