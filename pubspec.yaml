@@ -12,11 +12,15 @@ environment:
 # 包括 zlib inflate、Huffman、IDCT、VP8 位流。也不用 dart:ui 的解码能力
 # （只用 decodeImageFromPixels 把已经算好的 RGBA 交给 GPU）。
 #
-# 与解码无关的工具/资源包可以用：
+# 与解码无关的工具/资源包可以用。判断标准：这个包有没有替我们解析一个字节？
 #   cupertino_icons —— 图标字体，只是资源文件
 #   flutter_lints   —— 静态分析规则，只在开发期生效，不进产物
+#   file_selector   —— 系统文件选择对话框。它只负责把 Uint8List 交到手上，
+#                      一个字节也不解析。有了它 Web 端也能打开任意本地文件
+#                      （只是拿不到路径，所以解码器入口一律是 Uint8List）
 dependencies:
   cupertino_icons: ^1.0.9
+  file_selector: ^1.1.0
   flutter:
     sdk: flutter
 

@@ -8,5 +8,12 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- 用户通过系统对话框选中的文件/文件夹，允许读。
+	     没有这一条，file_selector 能弹出对话框、能返回路径，但读取时抛
+	     PathAccessException —— 看起来像解码器的 bug，其实是沙盒拦的。
+
+	     只给 read-only：本项目从不写图像文件。 -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
 </dict>
 </plist>
