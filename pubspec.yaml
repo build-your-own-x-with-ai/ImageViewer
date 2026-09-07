@@ -1,0 +1,26 @@
+name: image_viewer
+description: "纯 Dart 手写图像解码器：BMP / PNG / JPEG / WebP / PNM / YUV"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.2
+
+# 本项目的核心约束：零第三方依赖。
+# 只允许 Flutter SDK 自带的 flutter / flutter_test，
+# 连 cupertino_icons、flutter_lints 这类 pub.dev 包也一并去掉
+# （lint 规则本身内置于 analyzer，直接在 analysis_options.yaml 里列出即可）。
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    # 打包进 App 的样图。移动端与 Web 拿不到本地文件系统，
+    # 只能靠这些内置样图，所以它们是这些平台上唯一的图片来源。
+    - assets/samples/

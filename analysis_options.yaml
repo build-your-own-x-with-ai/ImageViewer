@@ -1,0 +1,62 @@
+# 静态分析配置。
+#
+# 注意：这里没有 `include: package:flutter_lints/flutter.yaml`。
+# 本项目零第三方依赖，所以不引入 flutter_lints 包，而是把需要的规则
+# 直接列出来 —— 这些规则本身内置于 Dart analyzer，不需要任何包。
+# 好处是每条约束都摆在明面上，方便教学时逐条讨论为什么要它。
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  errors:
+    # 解码器里大量位运算，一旦有 dead code 往往意味着掩码写错了，
+    # 所以把它从 warning 提到 error。
+    dead_code: error
+    unused_import: error
+    unused_local_variable: error
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
+
+linter:
+  rules:
+    # —— 正确性 ——
+    always_use_package_imports: true
+    avoid_empty_else: true
+    avoid_relative_lib_imports: true
+    avoid_slow_async_io: true
+    avoid_types_as_parameter_names: true
+    cancel_subscriptions: true
+    close_sinks: true
+    control_flow_in_finally: true
+    empty_statements: true
+    hash_and_equals: true
+    no_duplicate_case_values: true
+    throw_in_finally: true
+    unnecessary_statements: true
+    unrelated_type_equality_checks: true
+    use_build_context_synchronously: true
+
+    # —— 可读性：教学项目里比正确性同等重要 ——
+    always_declare_return_types: true
+    annotate_overrides: true
+    avoid_unnecessary_containers: true
+    curly_braces_in_flow_control_structures: true
+    directives_ordering: true
+    omit_local_variable_types: false  # 解码器里显式写出 int/double 更清楚
+    prefer_final_locals: true
+    prefer_single_quotes: true
+    slash_for_doc_comments: true
+    sort_child_properties_last: true
+    type_annotate_public_apis: true
+    unnecessary_brace_in_string_interps: true
+    unnecessary_const: true
+    unnecessary_new: true
+    unnecessary_this: true
+    use_super_parameters: true
