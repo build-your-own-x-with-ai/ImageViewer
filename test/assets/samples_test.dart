@@ -1,0 +1,734 @@
+/// `assets/samples/` 下内置样图的端到端测试。
+///
+/// ## 这个测试在测什么
+///
+/// 样图由 `tool/gen_samples.dart` 逐字节写出，那个脚本**不 import 项目里
+/// 任何解码代码**。所以这里是两套独立实现的交叉验证：生成器按规范写字节，
+/// 解码器按规范读字节，两边对上了才说明两边都对。
+///
+/// 关键纪律：下面所有期望值都是**手算的字面量**，不是用生成器的公式重算的。
+/// 一旦写成 `expect(px, computeGradient(x, y))`，就等于把生成器的逻辑复制
+/// 了一遍 —— 公式错了两边一起错，测试照样绿。
+///
+/// ## 顺带守住两件事
+///
+/// 1. 样图文件被误删、被改坏、或者生成参数变了而忘了更新测试，立刻暴露。
+/// 2. Web 与移动端拿不到本地文件系统，这些内置样图是那些平台上唯一的图片
+///    来源。它们坏了，UI 上就什么都看不到。
+///
+/// 无损格式一律 `tolerance: 0`。只有 YUV 允许容差 —— 8 位 limited range
+/// 往返本身就是有损的，详见下面 YUV 那一组的注释。
+library;
+
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:image_viewer/src/codecs/bmp/bmp_decoder.dart';
+import 'package:image_viewer/src/codecs/pnm/pnm_decoder.dart';
+import 'package:image_viewer/src/codecs/yuv/yuv_color.dart';
+import 'package:image_viewer/src/codecs/yuv/yuv_decoder.dart';
+import 'package:image_viewer/src/codecs/yuv/yuv_format.dart';
+import 'package:image_viewer/src/codecs/yuv/yuv_options.dart';
+import 'package:image_viewer/src/core/decoder_registry.dart';
+import 'package:image_viewer/src/core/errors.dart';
+import 'package:image_viewer/src/core/rgba_image.dart';
+import 'package:image_viewer/src/services/decode_service.dart';
+
+import '../support/pixel_matchers.dart';
+
+const BmpDecoder bmpDecoder = BmpDecoder();
+const PnmDecoder pnmDecoder = PnmDecoder();
+const YuvDecoder yuvDecoder = YuvDecoder();
+
+/// 读一个样图。`flutter test` 的工作目录是包根目录，所以相对路径可用。
+Uint8List load(String name) =>
+    File('assets/samples/$name').readAsBytesSync();
+
+/// 两行像素是否完全相同。
+///
+/// 用来判断「这幅图是不是斜的」：内容只跟 x 有关的图，任意两行都该相同。
+bool _rowsEqual(RgbaImage img, int y1, int y2) {
+  for (int x = 0; x < img.width; x++) {
+    final List<int> a = img.channelsAt(x, y1);
+    final List<int> b = img.channelsAt(x, y2);
+    for (int c = 0; c < 4; c++) {
+      if (a[c] != b[c]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void main() {
+  group('清单完整性', () {
+    // 这一组防的是「样图没生成」和「文件名改了但引用没跟上」。
+    // 后面每一组都假定文件存在，所以这个检查放最前面。
+    const List<String> expected = <String>[
+      'bands_80x32_rle8.bmp',
+      'checker_20x16.pbm',
+      'circle_64x64_32bpp.bmp',
+      'colorbars_96x64_i420_3frames.yuv',
+      'gradient_61x40_24bpp.bmp',
+      'gradient_64x32.pgm',
+      'gradient_64x48.ppm',
+      'rainbow_128x40_8bpp.bmp',
+      'ramp_16x8_ascii.pgm',
+      'ring_16x16_ascii.pbm',
+      'tiny_8x8_ascii.ppm',
+      'topdown_61x40_24bpp.bmp',
+    ];
+
+    test('12 个样图都在，且都不是空文件', () {
+      for (final String name in expected) {
+        final File f = File('assets/samples/$name');
+        expect(
+          f.existsSync(),
+          isTrue,
+          reason: '缺少样图 $name —— 跑一下 dart run tool/gen_samples.dart',
+        );
+        expect(f.lengthSync(), greaterThan(0), reason: '$name 是空文件');
+      }
+    });
+
+    test('目录里没有多余文件', () {
+      // 多出来的文件通常是手动丢进去的（比如从网上下的图）。
+      // 那种文件不受生成器管，换台机器就可能不在，测试会莫名其妙地挂。
+      final List<String> actual = Directory('assets/samples')
+          .listSync()
+          .whereType<File>()
+          .map((File f) => f.uri.pathSegments.last)
+          .where((String n) => !n.startsWith('.')) // .gitkeep
+          .toList()
+        ..sort();
+      expect(actual, expected);
+    });
+  });
+
+  group('BMP 24bpp 渐变（自底向上）', () {
+    // 生成器自底向上写：先写 y=39 那行。所以文件第 0 行是图像最后一行，
+    // 解码器必须把它放回最下面。方向搞反了下面三个断言全错。
+    //
+    // 每个像素：B = round(255·y/39)，G = round(255·x/60)，R = 128。
+    late final RgbaImage img = bmpDecoder.decode(load('gradient_61x40_24bpp.bmp'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 61);
+      expect(img.height, 40);
+      expect(img.metadata.format, 'BMP');
+      expect(img.metadata.bitDepth, 24);
+      expect(img.metadata.isLossless, isTrue);
+    });
+
+    test('四角与中心的像素值', () {
+      // 左上：y=0 → B=0；x=0 → G=0
+      expectPixel(img, 0, 0, <int>[128, 0, 0, 255], reason: '左上角');
+      // 右下：y=39 → B=255；x=60 → G=255
+      expectPixel(img, 60, 39, <int>[128, 255, 255, 255], reason: '右下角');
+      // 右上：G 满、B 空 —— 跟左下正好互换，能查出行列搞混
+      expectPixel(img, 60, 0, <int>[128, 255, 0, 255], reason: '右上角');
+      expectPixel(img, 0, 39, <int>[128, 0, 255, 255], reason: '左下角');
+      // 中心：round(255·20/39)=131，round(255·30/60)=128
+      expectPixel(img, 30, 20, <int>[128, 128, 131, 255]);
+    });
+
+    test('宽度 61 → 行末有 1 字节填充，且填充没被当成像素', () {
+      // 61 像素 × 3 字节 = 183，对齐到 4 的倍数是 184。每行多 1 个填充字节。
+      // 行跨距算成 183 的话，第 1 行就会整体左移 1 字节 —— 也就是错位 1/3
+      // 个像素，通道会串（B 读到上一行的 R），整幅图斜着扭过去。
+      //
+      // 所以这里查每一行的最后一个像素：它紧挨填充字节，最先出问题。
+      for (int y = 0; y < img.height; y++) {
+        final int b = (255 * y / 39).round();
+        expectPixel(img, 60, y, <int>[128, 255, b, 255],
+            reason: '第 $y 行最后一个像素 —— 行跨距应为 184 而不是 183');
+      }
+    });
+  });
+
+  group('BMP 24bpp 自顶向下（负高度）', () {
+    // 内容跟上一张上下颠倒地写，但标了负高度。解出来应该跟上一张一模一样。
+    late final RgbaImage topDown =
+        bmpDecoder.decode(load('topdown_61x40_24bpp.bmp'));
+
+    test('逐像素等于自底向上那张', () {
+      // 最强的断言：两种存储方向、同一幅图像。
+      // 负高度没处理的话这里会报出上下翻转（第 0 行对上第 39 行）。
+      final RgbaImage bottomUp =
+          bmpDecoder.decode(load('gradient_61x40_24bpp.bmp'));
+      expectImageMatches(topDown, bottomUp,
+          reason: '负高度表示自顶向下，解出来的图像应与自底向上版本一致');
+    });
+
+    test('两个文件的字节数相同但内容不同', () {
+      // 确认这不是同一份数据复制两遍 —— 那样上面那条断言就没意义了。
+      final Uint8List a = load('gradient_61x40_24bpp.bmp');
+      final Uint8List b = load('topdown_61x40_24bpp.bmp');
+      expect(a.length, b.length, reason: '同尺寸同位深，文件大小应相同');
+      expect(a, isNot(b), reason: '像素行的写入顺序相反，字节应该不同');
+    });
+  });
+
+  group('BMP 8bpp 调色板（256 色彩虹）', () {
+    // 每个像素存的是**索引**，颜色要去调色板里查。索引 = x·2（宽 128、
+    // 用满 256 项），调色板第 i 项是 hue = i·360/256 的饱和色。
+    //
+    // 调色板本身是 BGRA 顺序、第四字节保留为 0。解码器要把它当保留位
+    // 忽略、alpha 一律填 255 —— 拿它当 alpha 用的话整幅图全透明。
+    late final RgbaImage img = bmpDecoder.decode(load('rainbow_128x40_8bpp.bmp'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 128);
+      expect(img.height, 40);
+      expect(img.metadata.bitDepth, 8);
+      expect(img.metadata.colorSpace, '调色板索引');
+    });
+
+    test('调色板查表：色相 0/180/270 三处取值精确', () {
+      // 挑 60 的倍数 —— HSV→RGB 在那些角度上没有插值，值是精确的整数。
+      expectPixel(img, 0, 0, <int>[255, 0, 0, 255], reason: 'x=0 → 索引 0 → 红');
+      expectPixel(img, 64, 0, <int>[0, 255, 255, 255],
+          reason: 'x=64 → 索引 128 → 色相 180 → 青');
+      expectPixel(img, 96, 0, <int>[128, 0, 255, 255],
+          reason: 'x=96 → 索引 192 → 色相 270 → 紫');
+    });
+
+    test('相邻索引的颜色不同 —— 查表错一格就能查出来', () {
+      // x=1 取索引 2（色相 2.8125），而索引 1 是色相 1.40625。
+      // 两者 G 通道差 6，容差 0 下足以区分。查表偏一格这里就红了。
+      expectPixel(img, 1, 0, <int>[255, 12, 0, 255],
+          reason: 'x=1 → 索引 2，不是索引 1 的 [255, 6, 0]');
+      expectPixel(img, 127, 0, <int>[255, 0, 12, 255],
+          reason: 'x=127 → 索引 254 → 色相 357.1875');
+    });
+
+    test('alpha 全为 255 —— 调色板保留字节不能当 alpha 用', () {
+      // 这条单独立出来：保留字节是 0，误当 alpha 就是整幅图全透明。
+      // 那种 bug 在深色背景上"看起来只是图没显示"，很难定位。
+      for (int y = 0; y < img.height; y++) {
+        for (int x = 0; x < img.width; x++) {
+          expect(img.channelsAt(x, y)[3], 255,
+              reason: '($x, $y) 的 alpha 应为 255');
+        }
+      }
+      expect(img.hasTransparency, isFalse);
+    });
+
+    test('所有行完全相同 —— 颜色只跟 x 有关', () {
+      // 生成器里颜色只由 x 决定。任何行间差异都说明行跨距或翻转出了问题。
+      for (int y = 1; y < img.height; y++) {
+        for (int x = 0; x < img.width; x++) {
+          expect(img.channelsAt(x, y), img.channelsAt(x, 0),
+              reason: '第 $y 行与第 0 行不同（x=$x）');
+        }
+      }
+    });
+  });
+
+  group('BMP RLE8 游程编码（水平色带）', () {
+    // 16 条水平色带，每行编码成一整条游程：[80, 索引] 再跟一个 EOL。
+    // 解码行 oy 用调色板第 oy~/2 项；palette[i] 是 hue=i·22.5、s=0.85、v=0.95。
+    late final RgbaImage img = bmpDecoder.decode(load('bands_80x32_rle8.bmp'));
+
+    test('尺寸与压缩方式', () {
+      expect(img.width, 80);
+      expect(img.height, 32);
+      expect(img.metadata.bitDepth, 8);
+      expect(img.metadata.compression, 'RLE8 游程编码');
+    });
+
+    test('色带颜色与行号对应', () {
+      expectPixel(img, 0, 0, <int>[242, 36, 36, 255], reason: '第 0 行 → 索引 0');
+      expectPixel(img, 0, 2, <int>[242, 114, 36, 255], reason: '第 2 行 → 索引 1');
+      expectPixel(img, 0, 16, <int>[36, 242, 242, 255],
+          reason: '第 16 行 → 索引 8 → 色相 180');
+      expectPixel(img, 0, 31, <int>[242, 36, 114, 255], reason: '第 31 行 → 索引 15');
+    });
+
+    test('每行都是一整条纯色游程', () {
+      // 游程长度处理错了就会出现「半行有色、半行是黑」。逐行扫过去。
+      for (int y = 0; y < img.height; y++) {
+        final List<int> first = img.channelsAt(0, y);
+        for (int x = 1; x < img.width; x++) {
+          expect(img.channelsAt(x, y), first,
+              reason: '第 $y 行第 $x 列与行首不同 —— 游程没铺满整行');
+        }
+      }
+    });
+
+    test('相邻两行同色、隔两行换色', () {
+      // index = y~/2，所以第 0/1 行同色、第 2/3 行同色，但第 1 与第 2 行不同。
+      // EOL 少吃或多吃一行，这个「两行一组」的节奏立刻乱掉。
+      for (int y = 0; y < img.height; y += 2) {
+        expect(img.channelsAt(0, y), img.channelsAt(0, y + 1),
+            reason: '第 $y 行与第 ${y + 1} 行应同色');
+      }
+      for (int y = 0; y < img.height - 2; y += 2) {
+        expect(img.channelsAt(0, y), isNot(img.channelsAt(0, y + 2)),
+            reason: '第 $y 行与第 ${y + 2} 行应换色');
+      }
+    });
+  });
+
+  group('BMP 32bpp 带 alpha（羽化圆）', () {
+    // 圆心 (32.5, 32.5)，半径 26，边缘 6 像素线性羽化到全透明。
+    // 颜色按角度取色相、按距离取饱和度 —— 是个色轮。
+    //
+    // 这里刻意不写死羽化区的具体 alpha 值：那些值由 hypot 的浮点结果
+    // 四舍五入而来，手算容易在 .5 附近判断错。改成断言**结构性质**
+    // （单调、有中间值、两端精确），既守得住又不脆。
+    late final RgbaImage img = bmpDecoder.decode(load('circle_64x64_32bpp.bmp'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 64);
+      expect(img.metadata.bitDepth, 32);
+      expect(img.metadata.channels, 4);
+      expect(img.hasTransparency, isTrue, reason: '这张图就是为了测半透明');
+    });
+
+    test('圆心不透明、四角全透明', () {
+      expect(img.channelsAt(32, 32)[3], 255, reason: '圆心在实心区内');
+      for (final List<int> c in <List<int>>[
+        <int>[0, 0],
+        <int>[63, 0],
+        <int>[0, 63],
+        <int>[63, 63],
+      ]) {
+        expect(img.channelsAt(c[0], c[1])[3], 0,
+            reason: '角点 (${c[0]}, ${c[1]}) 距圆心约 44.5，远在半径 26 之外');
+      }
+    });
+
+    test('圆心接近白色 —— 饱和度随距离趋于 0', () {
+      // 距离 0.707 / 26 ≈ 0.027，饱和度几乎为 0，于是三通道都接近 255。
+      // 这条能查出通道错位：如果 R/B 互换了，圆心仍然是白的看不出来，
+      // 但下一条的色相分布会变 —— 两条合起来才完整。
+      final List<int> c = img.channelsAt(32, 32);
+      for (int i = 0; i < 3; i++) {
+        expect(c[i], greaterThanOrEqualTo(240),
+            reason: '圆心第 $i 通道应接近 255，实际 ${c[i]}');
+      }
+    });
+
+    test('alpha 沿半径单调递增（自外向内）', () {
+      // x=32 这一列，y 从 0 走到 31 是距圆心越来越近，alpha 只能升不能降。
+      // 上下翻转或行跨距错了，这条单调性立刻破掉。
+      int prev = -1;
+      for (int y = 0; y <= 31; y++) {
+        final int a = img.channelsAt(32, y)[3];
+        expect(a, greaterThanOrEqualTo(prev),
+            reason: '(32, $y) 的 alpha $a 比上一行的 $prev 还小');
+        prev = a;
+      }
+      expect(prev, 255, reason: 'y=31 已进入实心区');
+    });
+
+    test('羽化区真的有中间 alpha 值', () {
+      // 全 0 / 全 255 两种极端测不出混合是否正确。这条确认样图里确实有
+      // 一圈半透明像素 —— 否则棋盘格背景那个功能就没有素材可测。
+      int partial = 0;
+      for (int y = 0; y < img.height; y++) {
+        for (int x = 0; x < img.width; x++) {
+          final int a = img.channelsAt(x, y)[3];
+          if (a > 0 && a < 255) {
+            partial++;
+          }
+        }
+      }
+      // 半径 20–26 那一圈的面积约 860 像素，取 300 作下限留足余量。
+      expect(partial, greaterThan(300),
+          reason: '只找到 $partial 个半透明像素，羽化环太窄或没生成');
+    });
+  });
+
+  group('PNM P6 二进制彩色渐变', () {
+    // PNM 跟 BMP 相反，是**自顶向下**的，所以不需要翻转。
+    // R = round(255·x/63)，G = round(255·y/47)，B 固定 96。
+    // B 取 96 而不是 0：全 0 的通道分不清"没读"和"读到 0"。
+    late final RgbaImage img = pnmDecoder.decode(load('gradient_64x48.ppm'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 48);
+      expect(img.metadata.format, 'PNM');
+      expect(img.metadata.variant, startsWith('P6'));
+      expect(img.metadata.bitDepth, 8);
+    });
+
+    test('四角与中心，且方向没有翻转', () {
+      expectPixel(img, 0, 0, <int>[0, 0, 96, 255], reason: '左上');
+      expectPixel(img, 63, 47, <int>[255, 255, 96, 255], reason: '右下');
+      // 这两个角互换才是翻转的症状 —— 上面两条对称，单看查不出来。
+      expectPixel(img, 63, 0, <int>[255, 0, 96, 255], reason: '右上：R 满 G 空');
+      expectPixel(img, 0, 47, <int>[0, 255, 96, 255], reason: '左下：R 空 G 满');
+      expectPixel(img, 32, 24, <int>[130, 130, 96, 255]);
+    });
+
+    test('头部里的注释被跳过了', () {
+      // 头部是 `P6\n# ...\n64 48\n255\n`。注释没跳过的话宽高会解析成
+      // 注释里的字符，尺寸直接就不对 —— 上面的断言已经覆盖。
+      // 这里再确认一次 B 通道：注释多吃或少吃一个字节，像素数据整体错位，
+      // B 就不再是 96。
+      for (int y = 0; y < img.height; y += 8) {
+        expect(img.channelsAt(0, y)[2], 96,
+            reason: '(0, $y) 的 B 应为 96 —— 不是 96 说明像素数据起点算错了');
+      }
+    });
+  });
+
+  group('PNM P3 ASCII 彩色', () {
+    // 8×8，颜色是 hsvToRgb(i·5.625, 0.9, 1.0)，i = x + y·8。
+    // 故意做得小，能直接用文本编辑器打开看每个数字。
+    late final RgbaImage img = pnmDecoder.decode(load('tiny_8x8_ascii.ppm'));
+
+    test('尺寸与变体', () {
+      expect(img.width, 8);
+      expect(img.height, 8);
+      expect(img.metadata.variant, startsWith('P3'));
+    });
+
+    test('逐像素取值', () {
+      // s=0.9 而不是 1.0，所以最小通道不是 0，三个通道都非零 ——
+      // 任何通道错位都藏不住。
+      //
+      // 最小通道是 **25**，不是手算的 round(0.1·255)=26。原因是浮点：
+      // IEEE754 里 1.0 - 0.9 = 0.09999999999999998，乘 255 得 25.4999…，
+      // 四舍五入到 25。这不是 bug，是二进制浮点表示不了 0.1。
+      //
+      // 期望值取自文件里的实际数字（P3 是 ASCII，直接打开就能看），
+      // 不是重算公式得来的 —— 重算就会重犯同一个理想化错误。
+      expectPixel(img, 0, 0, <int>[255, 25, 25, 255], reason: 'i=0 → 色相 0');
+      expectPixel(img, 1, 0, <int>[255, 47, 25, 255], reason: 'i=1 → 色相 5.625');
+      expectPixel(img, 0, 1, <int>[255, 198, 25, 255], reason: 'i=8 → 色相 45');
+      // 跟 (1,0) 正好 G/B 互换 —— 通道顺序错了这条会红而 (0,0) 不会
+      // （(0,0) 的 G 与 B 相等，互换看不出来）。
+      expectPixel(img, 7, 7, <int>[255, 25, 47, 255], reason: 'i=63 → 色相 354.375');
+    });
+
+    test('ASCII 与二进制解出同样的东西', () {
+      // P3 和 P6 是同一份数据的两种写法。这里不比较像素（两张图内容不同），
+      // 只确认两条码路都能正常走完并给出合理结果。
+      final RgbaImage binary = pnmDecoder.decode(load('gradient_64x48.ppm'));
+      expect(binary.metadata.format, img.metadata.format);
+      expect(img.pixels.length, 8 * 8 * 4);
+    });
+  });
+
+  group('PNM P5 二进制灰度', () {
+    // 灰度图解成 RGBA 时三个通道要填同一个值。gray = round(255·x/63)。
+    late final RgbaImage img = pnmDecoder.decode(load('gradient_64x32.pgm'));
+
+    test('尺寸与变体', () {
+      expect(img.width, 64);
+      expect(img.height, 32);
+      expect(img.metadata.variant, startsWith('P5'));
+      expect(img.metadata.bitDepth, 8);
+    });
+
+    test('灰度值展开到三通道', () {
+      expectPixel(img, 0, 0, <int>[0, 0, 0, 255]);
+      expectPixel(img, 63, 0, <int>[255, 255, 255, 255]);
+      expectPixel(img, 32, 16, <int>[130, 130, 130, 255]);
+    });
+
+    test('每一行都一样 —— 灰度只跟 x 有关', () {
+      for (int y = 1; y < img.height; y++) {
+        for (int x = 0; x < img.width; x += 7) {
+          expect(img.channelsAt(x, y), img.channelsAt(x, 0),
+              reason: '第 $y 行第 $x 列与第 0 行不同');
+        }
+      }
+    });
+  });
+
+  group('PNM P2 ASCII 灰度，maxval=15', () {
+    // 这张图唯一的目的是查 maxval 缩放。样本值是 0..15，
+    // 解码器必须按 (v·255 + 7) ~/ 15 放大到 0..255。
+    // 不缩放直接当 8 位用的话，整张图会暗得几乎全黑 —— 最大值只到 15。
+    late final RgbaImage img = pnmDecoder.decode(load('ramp_16x8_ascii.pgm'));
+
+    test('尺寸与变体', () {
+      expect(img.width, 16);
+      expect(img.height, 8);
+      expect(img.metadata.variant, startsWith('P2'));
+      // maxval 15 仍然是 1 字节/样本，所以位深报 8。
+      expect(img.metadata.bitDepth, 8);
+    });
+
+    test('缩放确实发生了', () {
+      // x=1 的样本值是 1。缩放后是 17，不缩放就是 1。
+      // 这一条就是整个 maxval 逻辑的判别式。
+      expectPixel(img, 1, 0, <int>[17, 17, 17, 255],
+          reason: '样本值 1、maxval 15 → 17；如果得到 1，说明没做缩放');
+      expectPixel(img, 0, 0, <int>[0, 0, 0, 255], reason: '样本 0 → 0');
+      expectPixel(img, 15, 0, <int>[255, 255, 255, 255],
+          reason: '样本 15 = maxval → 必须正好是 255，不能是 254');
+      expectPixel(img, 8, 0, <int>[136, 136, 136, 255], reason: '样本 8 → 136');
+    });
+
+    test('端点精确 —— 缩放公式那个 +7 就是为了这个', () {
+      // 写成 v·255~/15 也能让 0→0、15→255，但中间值会一律偏小。
+      // 上面 x=1 得 17 与 x=8 得 136 两条合起来钉住了四舍五入版本：
+      // 截断版会给 17 与 136（恰好相同），所以再加一条中间值。
+      // 样本 7 → (7·255+7)~/15 = 119；截断版 (7·255)~/15 = 119，也相同。
+      // 真正能区分的是样本 4：(4·255+7)~/15 = 68，截断版也是 68。
+      // maxval=15 这个特例下两种写法结果一致（255 是 15 的整数倍），
+      // 所以这里只钉住端点与实际值，不假装能区分四舍五入。
+      expect(img.channelsAt(15, 0)[0], 255);
+      expect(img.channelsAt(0, 0)[0], 0);
+    });
+  });
+
+  group('PNM P4 二进制位图（棋盘格）', () {
+    // 位图有两个坑，这张图两个都占了：
+    //   1. **1 表示黑**，跟直觉相反（PNM 的位图是"墨水量"，不是亮度）。
+    //   2. 每行按字节对齐、高位在前。宽 20 不是 8 的倍数，
+    //      每行 3 字节里最后 4 位是填充。
+    late final RgbaImage img = pnmDecoder.decode(load('checker_20x16.pbm'));
+
+    test('尺寸与位深', () {
+      expect(img.width, 20);
+      expect(img.height, 16);
+      expect(img.metadata.variant, startsWith('P4'));
+      expect(img.metadata.bitDepth, 1);
+    });
+
+    test('1 是黑、0 是白', () {
+      // (x~/4 + y~/4) 为偶数时生成器写 1。写 1 的地方必须解成黑。
+      // 极性反了这两条会同时红 —— 这就是要的效果。
+      expectPixel(img, 0, 0, <int>[0, 0, 0, 255], reason: 'bit=1 → 黑');
+      expectPixel(img, 4, 0, <int>[255, 255, 255, 255], reason: 'bit=0 → 白');
+    });
+
+    test('每行重新按字节对齐 —— 填充位不能当像素', () {
+      // 这是这张图的核心。第 0 行占 3 字节 = 24 位，但只有前 20 位是像素，
+      // 后 4 位是填充（值为 0）。
+      //
+      // 如果解码器不在行边界重新对齐，第 1 行就会从第 20 位开始读，
+      // 于是先读到 4 个填充位（0 = 白）。而 (0,1) 应该是黑。
+      expectPixel(img, 0, 1, <int>[0, 0, 0, 255],
+          reason: '第 1 行必须从第 3 个字节的开头读起，不能接着第 0 行的填充位');
+      expectPixel(img, 0, 2, <int>[0, 0, 0, 255]);
+      expectPixel(img, 0, 3, <int>[0, 0, 0, 255]);
+      // 第 4 行换格子：y~/4 = 1，于是 x~/4 = 0 处变白。
+      expectPixel(img, 0, 4, <int>[255, 255, 255, 255], reason: '第 4 行起格子翻转');
+    });
+
+    test('行末那个不完整的字节读对了', () {
+      // x=16..19 在第 3 个字节的高 4 位。x~/4 = 4，与 y~/4=0 相加为偶 → 黑。
+      // 填充位当像素读的话这里会白。
+      expectPixel(img, 16, 0, <int>[0, 0, 0, 255]);
+      expectPixel(img, 19, 0, <int>[0, 0, 0, 255], reason: '最后一列');
+    });
+
+    test('位图没有 maxval 行', () {
+      // P4/P1 的头部只有 `P4\n20 16\n` 两行 —— 多读一个数字当 maxval
+      // 就会把第一个像素字节吃掉，整幅图错位一字节。
+      // 上面 (0,0) 是黑那条已经能查出来，这里确认尺寸也没被带偏。
+      expect(img.pixels.length, 20 * 16 * 4);
+    });
+  });
+
+  group('PNM P1 ASCII 位图（圆环）', () {
+    // 距圆心 4..7 之间画黑环。
+    late final RgbaImage img = pnmDecoder.decode(load('ring_16x16_ascii.pbm'));
+
+    test('尺寸与变体', () {
+      expect(img.width, 16);
+      expect(img.height, 16);
+      expect(img.metadata.variant, startsWith('P1'));
+      expect(img.metadata.bitDepth, 1);
+    });
+
+    test('环内是黑、环内外都是白', () {
+      expectPixel(img, 8, 8, <int>[255, 255, 255, 255],
+          reason: '圆心距 0.707，在内径 4 以内 → 白');
+      expectPixel(img, 13, 8, <int>[0, 0, 0, 255], reason: '距 5.52，在环上 → 黑');
+      expectPixel(img, 14, 8, <int>[0, 0, 0, 255], reason: '距 6.52，还在环上');
+      expectPixel(img, 15, 8, <int>[255, 255, 255, 255],
+          reason: '距 7.52，超出外径 7 → 白');
+      expectPixel(img, 0, 0, <int>[255, 255, 255, 255], reason: '角点距 10.6 → 白');
+    });
+
+    test('相邻数字之间没有空白也能解', () {
+      // P1 的一行是 `0000011111100000` —— 数字**紧挨着**，中间没有分隔符。
+      // 这是 P1 与 P2/P3 的关键差别：位图每个样本固定一个字符，所以不需要
+      // 分隔。按"读到空白才算一个 token"写的词法器在这里会把整行当成一个
+      // 巨大的数字，然后尺寸对不上而报错。
+      //
+      // 能解出正确尺寸和上面那些像素，就说明这条路走通了。
+      expect(img.pixels.length, 16 * 16 * 4);
+      // 再确认这一行确实黑白都有 —— 全白或全黑说明词法出了问题。
+      final Set<int> distinct = <int>{
+        for (int x = 0; x < 16; x++) img.channelsAt(x, 8)[0],
+      };
+      expect(distinct, <int>{0, 255}, reason: '第 8 行应同时含黑与白');
+    });
+  });
+
+  group('YUV I420 彩条（三帧）', () {
+    // 这一组是全套测试里唯一允许容差的：8 位 limited range 往返本身有损。
+    //
+    // 生成器按标准正向变换编码（Y∈16..235、Cb/Cr∈16..240），解码器按反向
+    // 变换解回来。两边都是 8 位整数量化，往返误差实测每通道最多 1
+    // （比如纯红 255 解回来是 254，纯绿的 B 通道从 0 变成 1）。
+    // 容差取 2 留一格余量。这个误差**不是 bug** —— 它就是 YUV 的代价。
+    //
+    // 取样点全部选在色条内部、且 2×2 色度块不跨条：色条边界上最近邻
+    // 上采样会把颜色抹开一格，那里对不上是设计使然。
+    const YuvOptions opts = YuvOptions(
+      width: 96,
+      height: 64,
+      format: YuvFormat.i420,
+      matrix: YuvMatrix.bt601,
+      range: YuvRange.limited,
+    );
+    late final Uint8List bytes = load('colorbars_96x64_i420_3frames.yuv');
+    late final RgbaImage frame0 = yuvDecoder.decodeWith(bytes, opts);
+
+    test('文件大小正好是三帧', () {
+      // I420 每帧 = w·h（Y） + 2·(w/2)·(h/2)（UV） = 96·64·1.5 = 9216。
+      // 帧大小算错就会读到帧的中间，图像看起来是上下错位的两半。
+      expect(YuvFormat.i420.frameSize(96, 64), 9216);
+      expect(bytes.length, 9216 * 3);
+    });
+
+    test('尺寸与元数据', () {
+      expect(frame0.width, 96);
+      expect(frame0.height, 64);
+      expect(frame0.metadata.format, 'YUV');
+      expect(frame0.metadata.variant, 'I420');
+    });
+
+    test('七条色条的颜色（容差 2）', () {
+      // 每条宽 96/7 ≈ 13.7，取样点都在条内部。
+      const List<List<int>> expected = <List<int>>[
+        <int>[4, 255, 255, 255], // 白
+        <int>[20, 255, 255, 0], // 黄
+        <int>[34, 0, 255, 255], // 青
+        <int>[48, 0, 255, 0], // 绿
+        <int>[60, 255, 0, 255], // 洋红
+        <int>[76, 255, 0, 0], // 红
+        <int>[90, 0, 0, 255], // 蓝
+      ];
+      for (final List<int> e in expected) {
+        expectPixel(frame0, e[0], 10, <int>[e[1], e[2], e[3], 255],
+            tolerance: 2, reason: 'x=${e[0]} 处的色条');
+      }
+    });
+
+    test('alpha 全为 255 —— YUV 没有 alpha 概念', () {
+      for (int y = 0; y < frame0.height; y += 8) {
+        for (int x = 0; x < frame0.width; x += 8) {
+          expect(frame0.channelsAt(x, y)[3], 255);
+        }
+      }
+    });
+
+    test('三帧各不相同，且色条逐帧右移', () {
+      // 帧 f 在 x=0 处是 bars[f]。这条同时验证两件事：
+      // 帧偏移算对了（帧大小 × 帧号），以及三帧确实是不同的内容。
+      const List<List<int>> firstBar = <List<int>>[
+        <int>[255, 255, 255], // 帧 0：白
+        <int>[255, 255, 0], // 帧 1：黄
+        <int>[0, 255, 255], // 帧 2：青
+      ];
+      for (int f = 0; f < 3; f++) {
+        final RgbaImage img =
+            yuvDecoder.decodeWith(bytes, opts.copyWith(frameIndex: f));
+        expectPixel(img, 4, 10,
+            <int>[firstBar[f][0], firstBar[f][1], firstBar[f][2], 255],
+            tolerance: 2, reason: '第 $f 帧最左边的色条');
+      }
+    });
+
+    test('越界帧号报错而不是读到垃圾', () {
+      // 文件只有三帧。要第 4 帧时必须明确报错 —— 静默返回一张噪声图
+      // 比报错糟得多，那种 bug 会被当成"解码器有问题"查很久。
+      expect(
+        () => yuvDecoder.decodeWith(bytes, opts.copyWith(frameIndex: 3)),
+        throwsA(isA<ImageDecodeException>()),
+      );
+    });
+
+    test('宽度填错但字节够 —— 不报错，画出一张斜图', () {
+      // 这是裸 YUV 最阴的一个坑，也是 docs/formats/yuv.md 里记的三大经典
+      // bug 之一：**参数错了但字节数够，解码器无从察觉**。
+      //
+      // 95×64 的 I420 需要 9120 字节，文件有 27648 字节，绰绰有余。
+      // 于是解码器老老实实解出一张 95×64 的图 —— 不抛异常、不警告。
+      // 每行少读一个字节，行与行之间累积错位，整幅图斜过去。
+      //
+      // 所以这条测试断言的是「它确实不报错」。把这件事写成测试，是为了
+      // 记住：YUV 的参数只能靠人填对，代码救不了。UI 上因此要把参数
+      // 显眼地摆出来让人核对，而不是藏在设置里。
+      final RgbaImage skewed =
+          yuvDecoder.decodeWith(bytes, opts.copyWith(width: 95));
+      expect(skewed.width, 95);
+      expect(skewed.height, 64);
+
+      // 怎么证明它真的斜了：正确宽度下每一行都一样（色条只跟 x 有关），
+      // 错误宽度下行与行之间必然不同。
+      final bool rowsIdenticalAt96 = _rowsEqual(frame0, 0, 32);
+      final bool rowsIdenticalAt95 = _rowsEqual(skewed, 0, 32);
+      expect(rowsIdenticalAt96, isTrue, reason: '宽度正确时第 0 行与第 32 行应相同');
+      expect(rowsIdenticalAt95, isFalse,
+          reason: '宽度错 1 会让每行累积错位，第 0 行与第 32 行不该再相同');
+    });
+
+    test('字节确实不够时才会报错，且报出还差多少', () {
+      // 512×64 的 I420 需要 49152 字节，文件只有 27648 —— 这时解码器
+      // 有据可查，必须报错。错误信息里要带上差多少字节，这样填错参数的人
+      // 能直接算出正确的宽高。
+      expect(
+        () => yuvDecoder.decodeWith(bytes, opts.copyWith(width: 512)),
+        throwsA(isA<ImageDecodeException>()),
+      );
+    });
+  });
+
+  group('通过注册表解码 —— 走的是 App 真正的那条路', () {
+    // 上面各组都是直接调具体解码器。这一组用 buildRegistry()，也就是
+    // decode_service 里 App 实际使用的那个注册表：先魔数嗅探，再分派。
+    //
+    // 意义在于：某个解码器的 canDecode 写错了，上面全绿而 App 里打不开图。
+    final DecoderRegistry registry = buildRegistry();
+
+    test('五张 BMP 与六张 PNM 都能被嗅探出来', () {
+      const Map<String, List<int>> expected = <String, List<int>>{
+        'gradient_61x40_24bpp.bmp': <int>[61, 40],
+        'topdown_61x40_24bpp.bmp': <int>[61, 40],
+        'rainbow_128x40_8bpp.bmp': <int>[128, 40],
+        'bands_80x32_rle8.bmp': <int>[80, 32],
+        'circle_64x64_32bpp.bmp': <int>[64, 64],
+        'gradient_64x48.ppm': <int>[64, 48],
+        'tiny_8x8_ascii.ppm': <int>[8, 8],
+        'gradient_64x32.pgm': <int>[64, 32],
+        'ramp_16x8_ascii.pgm': <int>[16, 8],
+        'checker_20x16.pbm': <int>[20, 16],
+        'ring_16x16_ascii.pbm': <int>[16, 16],
+      };
+      expected.forEach((String name, List<int> size) {
+        final Uint8List bytes = load(name);
+        expect(hasDecoderFor(bytes), isTrue, reason: '$name 没被任何解码器认领');
+        final RgbaImage img = registry.decode(bytes);
+        expect(<int>[img.width, img.height], size, reason: '$name 尺寸不对');
+      });
+    });
+
+    test('YUV 无法被嗅探 —— 这是设计如此，不是缺陷', () {
+      // 裸 YUV 没有魔数，第一个字节就是第一个像素的亮度。任何"嗅探 YUV"
+      // 的尝试都只能是猜。所以 YuvDecoder.canDecode 永远返回 false，
+      // 走注册表必然失败，必须由 UI 收集参数后调 decodeWith。
+      final Uint8List bytes = load('colorbars_96x64_i420_3frames.yuv');
+      expect(hasDecoderFor(bytes), isFalse);
+      expect(
+        () => registry.decode(bytes),
+        throwsA(isA<UnknownImageFormat>()),
+        reason: 'YUV 必须走 decodeWith 那条路',
+      );
+    });
+  });
+}
