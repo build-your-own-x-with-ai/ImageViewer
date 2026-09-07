@@ -15,8 +15,8 @@
 ### 工程与文档
 - [x] `flutter create` 六平台
 - [x] `git init`，主分支 `main`
-- [x] 清空第三方依赖（去掉 `cupertino_icons` / `flutter_lints`）
-- [x] `analysis_options.yaml` 显式列出 lint 规则
+- [x] 依赖收敛：不引入任何解码库；`cupertino_icons` / `flutter_lints` 保留（与解码无关）
+- [x] `analysis_options.yaml` 接上 `flutter_lints`，再按解码器的风险加严
 - [x] `docs/requirements.md`
 - [x] `docs/design.md`
 - [x] `docs/plan.md`
@@ -50,17 +50,20 @@
 - [x] 测试（38 个）+ `docs/formats/pnm.md`
 
 ### YUV
-- [ ] `YuvFormat` 布局描述子
-- [ ] 平面格式：I420 / YV12 / I422 / I444
-- [ ] 半平面格式：NV12 / NV21
-- [ ] 打包格式：YUY2 / UYVY
-- [ ] BT.601 / BT.709 × limited / full range
-- [ ] 测试 + `docs/formats/yuv.md`
+- [x] `YuvFormat` 布局描述子（九种格式 → 三个循环）
+- [x] 平面格式：I420 / YV12 / I422 / I444
+- [x] 半平面格式：NV12 / NV21
+- [x] 打包格式：YUY2 / YVYU / UYVY
+- [x] BT.601 / BT.709 / BT.2020 × limited / full range（六个系数全由 kr/kb 推导）
+- [x] 奇数尺寸色度平面向上取整 + 最近邻上采样
+- [x] 多帧序列（`frameIndex`）与参数错配时反推高度
+- [x] 测试（64 个）+ `docs/formats/yuv.md`
 
 ### UI 外壳
 - [ ] `platform/` 条件导入隔离 `dart:io`
 - [ ] 缩放平移视图
-- [ ] 目录浏览侧栏（桌面）/ assets 列表（移动端与 Web）
+- [ ] 系统文件选择器（各平台通用，只取字节不解析）
+- [ ] 目录浏览侧栏（桌面）/ assets 列表（各平台）
 - [ ] 格式信息面板
 - [ ] YUV 参数对话框（尺寸与格式）
 - [ ] 错误提示 UI

@@ -8,7 +8,7 @@
 
 | 约束 | 说明 |
 |---|---|
-| 零第三方依赖 | 只用 Flutter SDK 自带的 `flutter` / `flutter_test`。不引入任何 pub.dev 包，连 `cupertino_icons`、`flutter_lints` 也不用。 |
+| 零解码依赖 | **不使用任何图像解码库。**六种格式从原始字节手写解码，含 zlib inflate、Huffman、IDCT、VP8 位流。与解码无关的工具/资源包可以用：`cupertino_icons`（图标字体，纯资源）、`flutter_lints`（静态分析规则，只在开发期生效、不进产物）、文件选择器一类的系统集成插件（只负责把字节交到手上）。判断标准很简单：**这个包有没有替我们解析一个字节？**有就不用，没有就可以。 |
 | 零引擎解码 | 不调用 `ui.instantiateImageCodec` / `ui.decodeImageFromList` 解码图片。唯一允许的 `dart:ui` 图像调用是 `decodeImageFromPixels`，它只负责把我们算好的 RGBA 缓冲上传到 GPU，不参与任何解析。 |
 | 可教学 | 代码结构对应格式规范的章节结构；关键算法（inflate、Huffman、IDCT、预测器）保留朴素实现或加详细注释；文档给出字节级剖析。 |
 | 测试自包含 | `flutter test` 不依赖任何外部命令。样图一次性生成后提交进仓库。 |
@@ -21,7 +21,7 @@
 |---|---|
 | **BMP** | CORE / INFO / V4 / V5 头；1/4/8/16/24/32 bpp；调色板；RLE4 / RLE8；自底向上与自顶向下；`BI_BITFIELDS` 任意通道掩码 |
 | **PNM** | P1–P6 全部六种；ASCII 与二进制；maxval 1–65535；注释与任意空白 |
-| **YUV** | 裸流，尺寸与格式由用户指定。I420 / YV12 / NV12 / NV21 / YUY2 / UYVY / I422 / I444；BT.601 与 BT.709；limited / full range |
+| **YUV** | 裸流，尺寸与格式由用户指定。九种格式：I420 / YV12 / I422 / I444 / NV12 / NV21 / YUY2 / YVYU / UYVY；BT.601 / BT.709 / BT.2020 × limited / full range；多帧序列按帧号取帧 |
 | **PNG** | 自写 inflate；五种 filter；色彩类型 0/2/3/4/6 × 位深 1/2/4/8/16；`tRNS`；Adam7 隔行 |
 | **JPEG** | 基线与渐进式；任意采样因子（4:4:4 / 4:2:2 / 4:2:0 / 4:1:1）；重启间隔；YCbCr / 灰度 / Adobe CMYK-YCCK；EXIF 方向 |
 | **WebP** | VP8L 无损（含四种变换、颜色缓存、meta-Huffman）；VP8 有损（布尔解码、帧内预测、环路滤波）；ALPH 透明通道 |
@@ -42,15 +42,17 @@
 
 ### FR-4 文件来源（分平台）
 
-不用第三方库时各平台能力不同，这是明确接受的取舍：
+三条来源并存：系统文件选择器（各平台通用）、自写目录浏览侧栏（桌面）、内置 assets 样图（各平台都有，保证空手启动也有东西看）。
 
 | 平台 | 能力 |
 |---|---|
-| macOS / Windows / Linux | 自写目录浏览侧栏（`dart:io`）+ 命令行传入路径，可打开任意本地文件 |
-| iOS / Android | 内置 assets 样图 + 应用沙盒目录 |
-| Web | 仅内置 assets 样图 |
+| macOS / Windows / Linux | 系统文件选择器 + 自写目录浏览侧栏（`dart:io`）+ 命令行传入路径 |
+| iOS / Android | 系统文件选择器 + 应用沙盒目录 + 内置 assets 样图 |
+| Web | 系统文件选择器（只拿到字节，没有路径）+ 内置 assets 样图 |
 
-六个平台都必须能编译通过并运行，通过条件导入隔离 `dart:io`。
+Web 上拿不到文件路径，只能拿到 `Uint8List`。所以解码器的入口一律设计成
+`Uint8List → RgbaImage`，路径只是 UI 层的事 —— 这样同一套解码代码在六个平台
+上完全一致。六个平台都必须能编译通过并运行，通过条件导入隔离 `dart:io`。
 
 ### FR-5 教学模式
 
