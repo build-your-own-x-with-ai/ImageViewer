@@ -6,15 +6,22 @@ version: 0.1.0+1
 environment:
   sdk: ^3.13.2
 
-# 本项目的核心约束：零第三方依赖。
-# 只允许 Flutter SDK 自带的 flutter / flutter_test，
-# 连 cupertino_icons、flutter_lints 这类 pub.dev 包也一并去掉
-# （lint 规则本身内置于 analyzer，直接在 analysis_options.yaml 里列出即可）。
+# 本项目的核心约束：不使用任何图像解码库。
+#
+# BMP / PNG / JPEG / WebP / PNM / YUV 六种格式全部从原始字节手写解码，
+# 包括 zlib inflate、Huffman、IDCT、VP8 位流。也不用 dart:ui 的解码能力
+# （只用 decodeImageFromPixels 把已经算好的 RGBA 交给 GPU）。
+#
+# 与解码无关的工具/资源包可以用：
+#   cupertino_icons —— 图标字体，只是资源文件
+#   flutter_lints   —— 静态分析规则，只在开发期生效，不进产物
 dependencies:
+  cupertino_icons: ^1.0.9
   flutter:
     sdk: flutter
 
 dev_dependencies:
+  flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
 

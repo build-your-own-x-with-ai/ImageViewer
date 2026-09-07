@@ -1,9 +1,12 @@
 # 静态分析配置。
 #
-# 注意：这里没有 `include: package:flutter_lints/flutter.yaml`。
-# 本项目零第三方依赖，所以不引入 flutter_lints 包，而是把需要的规则
-# 直接列出来 —— 这些规则本身内置于 Dart analyzer，不需要任何包。
-# 好处是每条约束都摆在明面上，方便教学时逐条讨论为什么要它。
+# 先接上 flutter_lints 的官方推荐集，再在下面按本项目的需要加严。
+# flutter_lints 只在开发期生效、不进产物，也跟图像解码无关，
+# 所以它不违反「不使用解码库」这条约束。
+#
+# 下面显式列出的规则是**额外**加的，不是重复 flutter_lints 里已有的 ——
+# 每条都跟手写解码器的具体风险对应，方便教学时逐条讨论为什么要它。
+include: package:flutter_lints/flutter.yaml
 
 analyzer:
   language:
