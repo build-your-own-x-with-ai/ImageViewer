@@ -23,16 +23,21 @@ Flutter 六平台（macOS / iOS / Android / Linux / Windows / Web）。
 | 格式 | 覆盖范围 |
 |---|---|
 | **BMP** | 六个头部版本（CORE/INFO/V2/V3/V4/V5）、1/2/4/8 bpp 调色板、16 bpp（RGB555/565/4444/任意掩码）、24/32 bpp、RLE4/RLE8、自底向上与自顶向下 |
+| **PNG** | 自写 inflate（stored / 固定 / 动态 Huffman + LZ77）、五种滤波器、十五种色彩类型 × 位深组合、`tRNS` 透明、Adam7 隔行 |
 | **PNM** | P1–P6 全部六种，ASCII 与二进制，maxval 1–65535 |
 | **裸 YUV** | 九种布局（I420/YV12/I422/I444/NV12/NV21/YUY2/YVYU/UYVY）× BT.601/709/2020 × limited/full range，多帧序列 |
 
-PNG / JPEG / WebP 在计划里，见 `docs/plan.md`。
+JPEG / WebP 在计划里，见 `docs/plan.md`。
+
+PNG 这一项里一多半的代码其实不是 PNG：它自己的语义只有 IHDR 十三个字节
+加五个滤波器，复杂度全外包给了 deflate —— 而 deflate 得自己写
+（`lib/src/compress/`，阶段 4 的 WebP 会复用）。
 
 ## 跑起来
 
 ```bash
 flutter pub get
-dart tool/gen_samples.dart   # 生成十二张内置样图
+dart tool/gen_samples.dart   # 生成十八张内置样图
 flutter run                  # 或 -d macos / -d chrome / …
 ```
 
@@ -59,13 +64,18 @@ flutter run                  # 或 -d macos / -d chrome / …
 ## 测试
 
 ```bash
-flutter test      # 305 个
+flutter test      # 496 个
 flutter analyze   # 零告警
 ```
 
-十二张内置样图各自针对一个具体陷阱（行 4 字节对齐、自顶向下、RLE 增量跳转、
-YUV 尺寸错配……），`test/assets/samples_test.dart` 逐张验证它们确实还在
-踩那个陷阱 —— 样图退化成「一张普通的图」就失去意义了。
+十八张内置样图各自针对一个具体陷阱（行 4 字节对齐、自顶向下、RLE 增量跳转、
+YUV 尺寸错配、Adam7 七遍扫描、16 位缩放的取整方向……），
+`test/assets/samples_test.dart` 逐张验证它们确实还在踩那个陷阱 ——
+样图退化成「一张普通的图」就失去意义了。
+
+`docs/formats/png.md` 结尾那段 82 字节的十六进制转储也被钉进了测试：
+文档里逐字节标注的那张 2×2 PNG 必须真能解出预期结果，改了解码器而文档
+没跟上，测试会失败。
 
 ## 文档
 

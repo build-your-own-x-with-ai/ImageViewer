@@ -12,6 +12,13 @@
 
 ## 阶段 1 — 地基 + BMP + PNM + YUV （`v0.1.0`）
 
+> 收口于 2026-09-07。五条标准：`flutter run` ✅ / 305 测试 ✅ /
+> analyze 零告警 ✅ / 文档同步 ✅ / **tag 漏了**（当时没打，`v0.1.0`
+> 事后补在 `889292a` 上）。
+>
+> 这一条漏了三天没人发现，正说明**完成标准得逐条记下来**，光写在文件
+> 开头当口号不够。所以从阶段 2 起每个阶段都留这么一段。
+
 ### 工程与文档
 - [x] `flutter create` 六平台
 - [x] `git init`，主分支 `main`
@@ -75,17 +82,34 @@
 
 ## 阶段 2 — PNG （`v0.2.0`）
 
-- [ ] chunk 层：`IHDR` / `PLTE` / `IDAT` / `IEND` / `tRNS` / `gAMA` / `pHYs` / `tEXt`
-- [ ] CRC32 自建表与校验
-- [ ] **inflate 自写**：stored / 固定 Huffman / 动态 Huffman
-- [ ] 规范化 Huffman 码表解码
-- [ ] LZ77 32KB 滑动窗口
-- [ ] 五种 filter 逆运算：None / Sub / Up / Average / Paeth
-- [ ] 色彩类型 0/2/3/4/6 × 位深 1/2/4/8/16
-- [ ] `tRNS` 透明
-- [ ] Adam7 隔行七遍扫描
-- [ ] 16 位降 8 位
-- [ ] 测试 + `docs/formats/png.md`
+> 收口于 2026-09-10。五条标准：`flutter run` ✅ / 496 测试 ✅ /
+> analyze 零告警 ✅ / 文档同步 ✅ / tag `v0.2.0` ⏳（待打）。
+>
+> 计划里这一阶段写作「PNG」，做下来发现一多半工作量在 `compress/`：
+> PNG 自己的语义只有 IHDR 十三个字节加五个滤波器，而 deflate 是一整个
+> 解压器。所以拆成两组来记。详见 `implementation.md` 第 4 节。
+
+### compress 层（独立于 PNG，阶段 4 的 VP8L 会复用）
+- [x] `adler32.dart` —— zlib 尾部校验（覆盖解压后的字节）
+- [x] `huffman.dart` —— 规范化 Huffman 码表解码，含 Kraft 不等式检查
+- [x] `deflate_tables.dart` —— 长度/距离码表与 HCLEN 传输顺序
+- [x] **inflate 自写**：stored / 固定 Huffman / 动态 Huffman
+- [x] LZ77 回溯，最大距离 32768（重叠拷贝逐字节）
+- [x] 解压炸弹防护（`sizeLimit` 在写入前拦截）
+- [x] compress 层单测（67 个：adler32 11 / huffman 17 / inflate 39）
+
+### PNG
+- [x] chunk 层：`IHDR` / `PLTE` / `IDAT` / `IEND` / `tRNS` / `gAMA` / `pHYs` / `tEXt`
+- [x] CRC32 自建表与校验（`0xEDB88320`，覆盖类型 + 数据）
+- [x] 八字节签名嗅探（每个字节各防一种传输事故）
+- [x] 五种 filter 逆运算：None / Sub / Up / Average / Paeth
+- [x] 色彩类型 0/2/3/4/6 × 位深 1/2/4/8/16（十五种合法组合）
+- [x] `tRNS` 透明（调色板 / 灰度键色 / RGB 键色三种格式）
+- [x] Adam7 隔行七遍扫描
+- [x] 16 位降 8 位（四种位深缩放，调色板索引不缩放）
+- [x] 顺序约束校验（IHDR 首 / IEND 尾 / PLTE 先于 IDAT / IDAT 连续）
+- [x] 六张 PNG 样图（含 Adam7、16 位灰度、1 位、调色板、RGBA）
+- [x] 测试（97 个）+ `docs/formats/png.md`
 - [ ] 可选：APNG
 
 ## 阶段 3 — JPEG （`v0.3.0`）
