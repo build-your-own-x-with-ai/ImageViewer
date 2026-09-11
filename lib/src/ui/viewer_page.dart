@@ -485,9 +485,9 @@ const double _sidebarWidth = 280;
 
 /// 文件选择器的过滤条件。
 ///
-/// **只列已经实现了解码器的格式。** 把 png/jpeg 也塞进来会让用户选中一个
-/// PNG，然后得到「没有解码器认领」+「试试按裸 YUV 解码」的建议 —— 而那是
-/// 一张完全正常的 PNG，建议是错的。等 PNG 解码器写完再往这儿加。
+/// **只列已经实现了解码器的格式。** 把 jpeg/webp 也塞进来会让用户选中一个
+/// 完全正常的 JPEG，然后得到「没有解码器认领」+「试试按裸 YUV 解码」的建议
+/// —— 建议是错的。每写完一个解码器才往这儿加一行。
 ///
 /// 侧栏的 `kBrowsableExtensions` 比这份宽，那是刻意的：列目录时宁可多显示
 /// 一个让用户点开看看。而选择器是**主动限制用户能选什么**，宽了就是误导。
@@ -496,6 +496,7 @@ const List<XTypeGroup> _typeGroups = <XTypeGroup>[
     label: '支持的图像',
     extensions: <String>[
       'bmp', 'dib', // BMP
+      'png', // PNG（APNG 会当成第一帧打开，所以不列 .apng）
       'pnm', 'pbm', 'pgm', 'ppm', // PNM
       'yuv', 'raw', 'i420', 'yv12', 'nv12', 'nv21', 'yuy2', 'uyvy', // 裸 YUV
     ],
