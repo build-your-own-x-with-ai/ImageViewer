@@ -25,6 +25,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_viewer/src/codecs/bmp/bmp_decoder.dart';
+import 'package:image_viewer/src/codecs/png/png_decoder.dart';
 import 'package:image_viewer/src/codecs/pnm/pnm_decoder.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_color.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_decoder.dart';
@@ -38,6 +39,7 @@ import 'package:image_viewer/src/services/decode_service.dart';
 import '../support/pixel_matchers.dart';
 
 const BmpDecoder bmpDecoder = BmpDecoder();
+const PngDecoder pngDecoder = PngDecoder();
 const PnmDecoder pnmDecoder = PnmDecoder();
 const YuvDecoder yuvDecoder = YuvDecoder();
 
@@ -68,19 +70,25 @@ void main() {
     const List<String> expected = <String>[
       'bands_80x32_rle8.bmp',
       'checker_20x16.pbm',
+      'checker_35x24_gray1.png',
       'circle_64x64_32bpp.bmp',
       'colorbars_96x64_i420_3frames.yuv',
+      'disc_64x64_rgba8.png',
       'gradient_61x40_24bpp.bmp',
       'gradient_64x32.pgm',
       'gradient_64x48.ppm',
+      'gradient_96x64_rgb8.png',
+      'hues_64x48_palette8.png',
       'rainbow_128x40_8bpp.bmp',
       'ramp_16x8_ascii.pgm',
+      'ramp_64x64_gray16.png',
       'ring_16x16_ascii.pbm',
+      'rings_64x64_adam7.png',
       'tiny_8x8_ascii.ppm',
       'topdown_61x40_24bpp.bmp',
     ];
 
-    test('12 个样图都在，且都不是空文件', () {
+    test('18 个样图都在，且都不是空文件', () {
       for (final String name in expected) {
         final File f = File('assets/samples/$name');
         expect(
@@ -689,6 +697,358 @@ void main() {
     });
   });
 
+  group('PNG RGB8 渐变（真 zlib 压缩）', () {
+    // 这一组和上面所有组有个本质区别：压缩数据是 `dart:io` 的 ZLibCodec
+    // 以 level 9 写出来的，也就是 zlib 官方实现的输出。
+    //
+    // 单元测试里的 PNG 一律用**存储块**，压根不碰 Huffman 路径。这张图
+    // 补上的正是那一块 —— 我们手写的 inflate 能解开 zlib 的动态 Huffman
+    // 块，才说明它真的实现了 RFC 1951，而不只是能解开自家写出来的东西。
+    //
+    // 每个像素：R = 255·x÷95，G = 255·y÷63，B = 255·(x+y)÷158（整数除法，
+    // 向下取整，不是四舍五入 —— 生成器用的是 `~/`）。
+    late final RgbaImage img = pngDecoder.decode(load('gradient_96x64_rgb8.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 96);
+      expect(img.height, 64);
+      expect(img.metadata.format, 'PNG');
+      expect(img.metadata.variant, '真彩色 RGB');
+      expect(img.metadata.bitDepth, 8); // 每采样 8 位，不是每像素 24
+      expect(img.metadata.channels, 3);
+      expect(img.metadata.isLossless, isTrue);
+      expect(img.metadata.extra['隔行方式'], '无');
+    });
+
+    test('四角与中心的像素值', () {
+      expectPixel(img, 0, 0, const <int>[0, 0, 0, 255], reason: '左上角');
+      // 95·255÷95 = 255；(95+0)·255÷158 = 153
+      expectPixel(img, 95, 0, const <int>[255, 0, 153, 255], reason: '右上角');
+      // 63·255÷63 = 255；(0+63)·255÷158 = 101
+      expectPixel(img, 0, 63, const <int>[0, 255, 101, 255], reason: '左下角');
+      expectPixel(img, 95, 63, const <int>[255, 255, 255, 255], reason: '右下角');
+      // 48·255÷95 = 128；32·255÷63 = 129；80·255÷158 = 129
+      expectPixel(img, 48, 32, const <int>[128, 129, 129, 255]);
+    });
+
+    test('R 只跟 x 有关，G 只跟 y 有关', () {
+      // 一整行里 G 必须恒定、R 必须单调不减。反过来（R 恒定、G 变化）
+      // 就是行列搞混了 —— 那种错在正方形图上看不出来，96×64 能。
+      for (int y = 0; y < img.height; y += 7) {
+        final int g = y * 255 ~/ 63;
+        for (int x = 0; x < img.width; x += 5) {
+          final List<int> px = img.channelsAt(x, y);
+          expect(px[1], g, reason: '($x, $y) 的 G 应只由 y 决定');
+          expect(px[0], x * 255 ~/ 95, reason: '($x, $y) 的 R 应只由 x 决定');
+        }
+      }
+    });
+
+    test('压缩数据用的是动态 Huffman 块', () {
+      // 这一条是本组存在的理由。zlib 以 level 9 压一张渐变图，必然选动态
+      // Huffman —— 于是这个断言证明了「我们的 inflate 解开了 zlib 生成的
+      // 动态码表」，而不只是解开了测试里手搭的那些。
+      expect(img.metadata.extra['deflate 块'], contains('动态'));
+      expect(img.metadata.extra['解压后'], '${64 * (96 * 3 + 1)} 字节');
+
+      // 18496 字节的原始数据压到几百字节。渐变图对 deflate 极其友好：
+      // 滤波之后大量字节变成 0 附近的小值。
+      final String ratio = img.metadata.extra['压缩率']! as String;
+      expect(double.parse(ratio.split(':').first), greaterThan(10));
+    });
+
+    test('逐行挑滤波器，所以用上了多种', () {
+      // 生成器对每一行都试遍五种、取绝对值之和最小的那个（libpng 的默认
+      // 启发式）。于是这张图天然会用上不止一种滤波器，把解码端的多条分支
+      // 一次跑到 —— 单元测试里那些「整张图一种滤波器」的用例覆盖不到
+      // 「上一行用 Paeth、这一行用 Sub」的衔接。
+      final String used = img.metadata.extra['滤波器用量']! as String;
+      expect(used.split(', ').length, greaterThan(1), reason: '实际用量：$used');
+
+      // 各滤波器的行数加起来必须等于总行数。
+      int rows = 0;
+      for (final String part in used.split(', ')) {
+        rows += int.parse(part.split('×').last);
+      }
+      expect(rows, 64);
+    });
+
+    test('辅助 chunk 都被读出来了', () {
+      expect(img.metadata.extra['gAMA'], '0.45455');
+      expect(img.metadata.extra['pHYs'], contains('96×96 DPI'));
+      expect(img.metadata.extra['tEXt:Software'],
+          'ImageViewer gen_samples.dart');
+      // IHDR + gAMA + pHYs + tEXt + IDAT + IEND
+      expect(img.metadata.extra['chunk 数'], 6);
+    });
+  });
+
+  group('PNG RGBA8 圆盘（alpha 渐隐）', () {
+    // 和 circle_64x64_32bpp.bmp 画的是同一个形状：两种格式表达同一张图。
+    // 圆心 (31.5, 31.5)，半径 30，最外 8 像素线性渐隐。
+    late final RgbaImage img = pngDecoder.decode(load('disc_64x64_rgba8.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 64);
+      expect(img.metadata.variant, '真彩色 RGBA');
+      expect(img.metadata.channels, 4);
+      expect(img.metadata.extra['透明像素'], '有');
+      // 有 alpha 通道的图不该同时带 tRNS，所以没有关键色那一项。
+      expect(img.metadata.extra.containsKey('关键色透明'), isFalse);
+    });
+
+    test('圆心不透明，圆外全透明', () {
+      // 圆心附近：d = sqrt(0.5) ≈ 0.71 < 22，alpha 满。
+      // R = 255·31÷63 = 125，G 同，B 恒 200。
+      expectPixel(img, 31, 31, const <int>[125, 125, 200, 255]);
+      // 255·32÷63 = 129
+      expectPixel(img, 32, 32, const <int>[129, 129, 200, 255]);
+      // 角落：d = 31.5·√2 ≈ 44.5 ≥ 30，alpha 为 0。
+      expect(img.channelsAt(0, 0)[3], 0, reason: '左上角应完全透明');
+      expect(img.channelsAt(63, 63)[3], 0, reason: '右下角应完全透明');
+    });
+
+    test('透明像素仍保留自己的 RGB —— PNG 不做预乘', () {
+      // 这是容易被忽略的一点：alpha=0 的像素，RGB 依然是写进去的值，
+      // 不是 0。若解码时按预乘处理（RGB 乘以 alpha），这里就会读到黑色。
+      // PNG 规范明确：存的是**非**预乘的直通 alpha。
+      expectPixel(img, 0, 0, const <int>[0, 0, 200, 0]);
+    });
+
+    test('渐隐带上的 alpha 是算出来的中间值', () {
+      // (57, 31)：dx = 25.5，dy = -0.5，d = √650.5 ≈ 25.5049。
+      // 落在 22..30 的渐隐带里：alpha = round((30 - 25.5049) / 8 · 255) = 143。
+      // 这个值既不是 0 也不是 255，能查出「渐隐被做成硬边」的实现。
+      expectPixel(img, 57, 31, const <int>[230, 125, 200, 143]);
+    });
+  });
+
+  group('PNG 8 位调色板 + tRNS（色相条）', () {
+    // 32 项调色板，内容只跟 x 有关：索引 = x ÷ 2。
+    // tRNS 只给了前 8 项（alpha 依次 0/32/64/…/224），剩下 24 项按规范
+    // 默认不透明。
+    late final RgbaImage img = pngDecoder.decode(load('hues_64x48_palette8.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 48);
+      expect(img.metadata.variant, '调色板');
+      expect(img.metadata.colorSpace, '调色板（sRGB）');
+      expect(img.metadata.bitDepth, 8); // 索引的位数
+      expect(img.metadata.channels, 1); // 一个索引就是一个采样
+      expect(img.metadata.extra['调色板'], '32 项');
+      expect(img.metadata.extra['透明像素'], '有');
+      expect(img.metadata.extra['调色板说明'], '32 项，8 位索引最大可到 255');
+    });
+
+    test('索引查表得到的颜色', () {
+      // x=0..1 → 索引 0 → 色相环起点纯红
+      expectPixel(img, 0, 0, const <int>[255, 0, 0, 0]);
+      expectPixel(img, 1, 0, const <int>[255, 0, 0, 0]);
+      // x=2 → 索引 1 → [255, 47, 0]，tRNS 第 1 项 alpha=32
+      expectPixel(img, 2, 0, const <int>[255, 47, 0, 32]);
+      // x=63 → 索引 31 → 环末尾回到红紫 [255, 0, 48]
+      expectPixel(img, 63, 0, const <int>[255, 0, 48, 255]);
+    });
+
+    test('tRNS 比 PLTE 短 —— 缺的项默认不透明', () {
+      // 这是最容易写反的一处。tRNS 只有 8 项，索引 8 及以后没有对应的
+      // alpha。规范说默认 255（不透明）；若实现按「缺省补 0」处理，
+      // 这张图右边四分之三会凭空消失。
+      expect(img.channelsAt(14, 0)[3], 224, reason: '索引 7 —— tRNS 最后一项');
+      expect(img.channelsAt(16, 0)[3], 255, reason: '索引 8 —— 超出 tRNS');
+      for (int x = 16; x < 64; x++) {
+        expect(img.channelsAt(x, 0)[3], 255, reason: 'x=$x 应不透明');
+      }
+    });
+
+    test('内容只跟 x 有关，所以每行都一样', () {
+      // 调色板图一行一个字节地存索引，没有位打包，行跨距 = 宽度。
+      // 若把行跨距算错，各行会依次错开，这个断言立刻挂。
+      for (int y = 1; y < img.height; y++) {
+        expect(_rowsEqual(img, 0, y), isTrue, reason: '第 $y 行与第 0 行不同');
+      }
+    });
+  });
+
+  group('PNG 16 位灰度渐变（降位的证据）', () {
+    // 64×64，每采样两字节大端。第 (y·64 + x) 个像素的 16 位值是
+    // (y·64 + x)·65535 ÷ 4095，也就是索引乘 16 —— 4096 个像素刚好铺满
+    // 0..65535，每步 16。
+    //
+    // 这张图存在的唯一理由是查降位：16 位要变成 8 位，正确做法是
+    // round(v·255 / 65535)，等价于 (v·255 + 32767) ÷ 65535。
+    late final RgbaImage img = pngDecoder.decode(load('ramp_64x64_gray16.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 64);
+      expect(img.metadata.variant, '灰度');
+      expect(img.metadata.bitDepth, 16);
+      expect(img.metadata.channels, 1);
+      // 64 行 × (64 像素 × 2 字节 + 1 滤波字节) = 8256
+      expect(img.metadata.extra['解压后'], '8256 字节');
+    });
+
+    test('两端与中点', () {
+      // 灰度展开成 RGB 三个相同的值，alpha 补 255。
+      expectPixel(img, 0, 0, const <int>[0, 0, 0, 255]);
+      expectPixel(img, 63, 63, const <int>[255, 255, 255, 255]);
+      // 索引 2015 → 16 位值 32240 → round(32240·255/65535) = 125
+      expectPixel(img, 31, 31, const <int>[125, 125, 125, 255]);
+    });
+
+    test('降位是四舍五入，不是丢掉低字节', () {
+      // 关键的一对相邻像素：
+      //   索引 8 → 16 位 128 → 128·255/65535 = 0.498 → 四舍五入 0
+      //   索引 9 → 16 位 144 → 144·255/65535 = 0.560 → 四舍五入 1
+      // 若实现是「取高字节」，这两个的高字节都是 0，会一起变成 0，
+      // 这里就会看到 1 变成 0。整条渐变上会出现 256 级的台阶。
+      expect(img.channelsAt(8, 0)[0], 0, reason: '16 位 128 应降到 0');
+      expect(img.channelsAt(9, 0)[0], 1, reason: '16 位 144 应降到 1');
+    });
+
+    test('渐变单调不减，且横跨行边界也连续', () {
+      // 逐像素比较。真正想查的是行末到下一行行首：索引是连续的，所以
+      // 灰度也必须连续。若行跨距算错，这里会出现回跳。
+      int prev = -1;
+      for (int y = 0; y < img.height; y++) {
+        for (int x = 0; x < img.width; x++) {
+          final int v = img.channelsAt(x, y)[0];
+          expect(v, greaterThanOrEqualTo(prev), reason: '($x, $y) 处回跳了');
+          prev = v;
+        }
+      }
+      expect(prev, 255);
+    });
+  });
+
+  group('PNG 1 位灰度棋盘（宽度不是 8 的倍数）', () {
+    // 35×24，一格 5 像素：on = ((x÷5) + (y÷5)) % 2 == 0。
+    //
+    // 宽度 35 是刻意选的：每行 5 字节，最后一字节只有 3 位是真像素，
+    // 剩 5 位是填充。位序 MSB 先 —— 一字节的最高位是最左那个像素，
+    // 和 deflate 数据字段的 LSB 先正好相反。
+    late final RgbaImage img = pngDecoder.decode(load('checker_35x24_gray1.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 35);
+      expect(img.height, 24);
+      expect(img.metadata.variant, '灰度');
+      expect(img.metadata.bitDepth, 1);
+      expect(img.metadata.channels, 1);
+      // 24 行 × ((35+7)÷8 + 1) = 24 × 6 = 144
+      expect(img.metadata.extra['解压后'], '144 字节');
+    });
+
+    test('1 位灰度按满量程展开：1 → 255', () {
+      // 位深 1 时最大采样值是 1，所以 1 要拉到 255 而不是留成 1。
+      // 若照 8 位那样直接用采样值，整张图会是全黑配"几乎全黑"。
+      expectPixel(img, 0, 0, const <int>[255, 255, 255, 255], reason: '第一格');
+      expectPixel(img, 5, 0, const <int>[0, 0, 0, 255], reason: '第二格');
+      expectPixel(img, 0, 5, const <int>[0, 0, 0, 255]);
+      expectPixel(img, 5, 5, const <int>[255, 255, 255, 255]);
+    });
+
+    test('末字节的 5 个填充位没被当成像素', () {
+      // x=34 是最后一个真像素，落在第 5 字节的第 3 位（MSB 起数）。
+      // 34÷5 = 6（偶），所以它的开关只由 y÷5 的奇偶决定。
+      //
+      // 若解码器把填充位也算进去，宽度会变成 40，右边多出 5 列杂点；
+      // 若行跨距按 35÷8 = 4 字节算，每行都会左移，图案整体扭斜。
+      for (int y = 0; y < img.height; y++) {
+        final bool on = (y ~/ 5) % 2 == 0;
+        final int v = on ? 255 : 0;
+        expectPixel(img, 34, y, <int>[v, v, v, 255],
+            reason: '第 $y 行最后一个像素');
+        // x=0 的格列号也是偶数，所以两端应当同色。
+        expectPixel(img, 0, y, <int>[v, v, v, 255], reason: '第 $y 行第一个像素');
+      }
+    });
+
+    test('每格 5×5 都是纯色', () {
+      // 格子内部完全一致才说明位提取的顺序对。位序若反（LSB 先），
+      // 格子边界会在字节内错位，5 像素的格子会变成锯齿状。
+      for (int cy = 0; cy < 24 ~/ 5; cy++) {
+        for (int cx = 0; cx < 35 ~/ 5; cx++) {
+          final int v = (cx + cy) % 2 == 0 ? 255 : 0;
+          for (int dy = 0; dy < 5; dy++) {
+            for (int dx = 0; dx < 5; dx++) {
+              expectPixel(img, cx * 5 + dx, cy * 5 + dy, <int>[v, v, v, 255],
+                  reason: '格 ($cx, $cy) 内的 ($dx, $dy)');
+            }
+          }
+        }
+      }
+    });
+  });
+
+  group('PNG Adam7 隔行同心环', () {
+    // 64×64 RGB8，内容按到圆心 (31.5, 31.5) 的距离分环：
+    //   d = round(sqrt(dx² + dy²))，(d ÷ 4) 为偶数时是"环"色。
+    //   环色 [240, 60 + 2d, 30]，底色 [30, 30, 120 + 2d]。
+    //
+    // 七遍隔行的每一遍都是一张独立的小图：行字节数按**本遍宽度**重算，
+    // 上一行缓冲在遍与遍之间重置。这两点错一个，图案就会碎掉。
+    late final RgbaImage img = pngDecoder.decode(load('rings_64x64_adam7.png'));
+
+    test('尺寸与元数据', () {
+      expect(img.width, 64);
+      expect(img.height, 64);
+      expect(img.metadata.extra['隔行方式'], 'Adam7 隔行');
+      expect(img.metadata.variant, '真彩色 RGB + Adam7 隔行');
+    });
+
+    test('隔行的原始数据比非隔行更大', () {
+      // 逐遍手算：七遍的子图尺寸分别是
+      //   8×8, 8×8, 16×8, 16×16, 32×16, 32×32, 64×32
+      // 每遍每行 3·宽 字节再加 1 个滤波字节：
+      //   8×(24+1) + 8×(24+1) + 8×(48+1) + 16×(48+1)
+      //   + 16×(96+1) + 32×(96+1) + 32×(192+1)
+      //   = 200 + 200 + 392 + 784 + 1552 + 3104 + 6176 = 12408
+      // 非隔行同尺寸是 64×(192+1) = 12352，隔行多出 56 字节 —— 正好是
+      // 多出来的 56 行滤波字节（120 行 - 64 行）。
+      //
+      // 「隔行能省体积」是个常见的想当然。Adam7 换来的是渐显，不是体积；
+      // 位深小于 8 时每遍还要各自补到字节边界，差距更大。
+      expect(img.metadata.extra['解压后'], '12408 字节');
+      expect(12408 - 64 * (192 + 1), 56);
+    });
+
+    test('七遍拼回来的像素值', () {
+      // 这几个点分属不同的遍：(0,0) 在第 1 遍，(4,0) 在第 2 遍，
+      // (0,4) 在第 3 遍，(2,0) 在第 4 遍，(1,0) 在第 6 遍，(0,1) 在第 7 遍。
+      // 某一遍的偏移或步长写错，只有那一遍的点会错 —— 混在一起看是"图案
+      // 有杂点"，逐点查才定位得到。
+      //
+      // (0,0)：d = round(31.5·√2) = 45，45÷4 = 11 奇 → 底色 [30,30,210]
+      expectPixel(img, 0, 0, const <int>[30, 30, 210, 255]);
+      // (31,31)：d = round(√0.5) = 1，0 偶 → 环色 [240,62,30]
+      expectPixel(img, 31, 31, const <int>[240, 62, 30, 255]);
+      // (63,31)：d = round(√(31.5²+0.5²)) = 32，8 偶 → 环色 [240,124,30]
+      expectPixel(img, 63, 31, const <int>[240, 124, 30, 255]);
+    });
+
+    test('图案关于中心左右、上下对称', () {
+      // 距离只跟 |dx|、|dy| 有关，所以 (x,y) 必须等于 (63-x,y) 和 (x,63-y)。
+      // 这是对 Adam7 最有效的整体检查：任何一遍的 xOffset / xStep 偏了，
+      // 那一遍的像素会落到错误的列上，对称性立刻破。
+      for (int y = 0; y < 64; y++) {
+        for (int x = 0; x < 32; x++) {
+          expect(img.channelsAt(x, y), img.channelsAt(63 - x, y),
+              reason: '($x, $y) 与 (${63 - x}, $y) 应左右对称');
+        }
+      }
+      for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 64; x++) {
+          expect(img.channelsAt(x, y), img.channelsAt(x, 63 - y),
+              reason: '($x, $y) 与 ($x, ${63 - y}) 应上下对称');
+        }
+      }
+    });
+  });
+
   group('通过注册表解码 —— 走的是 App 真正的那条路', () {
     // 上面各组都是直接调具体解码器。这一组用 buildRegistry()，也就是
     // decode_service 里 App 实际使用的那个注册表：先魔数嗅探，再分派。
@@ -696,7 +1056,7 @@ void main() {
     // 意义在于：某个解码器的 canDecode 写错了，上面全绿而 App 里打不开图。
     final DecoderRegistry registry = buildRegistry();
 
-    test('五张 BMP 与六张 PNM 都能被嗅探出来', () {
+    test('五张 BMP、六张 PNM 与六张 PNG 都能被嗅探出来', () {
       const Map<String, List<int>> expected = <String, List<int>>{
         'gradient_61x40_24bpp.bmp': <int>[61, 40],
         'topdown_61x40_24bpp.bmp': <int>[61, 40],
@@ -709,6 +1069,12 @@ void main() {
         'ramp_16x8_ascii.pgm': <int>[16, 8],
         'checker_20x16.pbm': <int>[20, 16],
         'ring_16x16_ascii.pbm': <int>[16, 16],
+        'gradient_96x64_rgb8.png': <int>[96, 64],
+        'disc_64x64_rgba8.png': <int>[64, 64],
+        'hues_64x48_palette8.png': <int>[64, 48],
+        'ramp_64x64_gray16.png': <int>[64, 64],
+        'checker_35x24_gray1.png': <int>[35, 24],
+        'rings_64x64_adam7.png': <int>[64, 64],
       };
       expected.forEach((String name, List<int> size) {
         final Uint8List bytes = load(name);

@@ -594,6 +594,415 @@ double _atan2Degrees(double y, double x) =>
     math.atan2(y, x) * 180 / math.pi;
 
 // ———————————————————————————————————————————————————————————————
+// PNG
+//
+// 这一节和前面三种格式有个本质区别：PNG 的像素必须经 deflate 压缩，而手写
+// 一个 deflate **编码器**（LZ77 匹配 + Huffman 构树 + 码长传输）的工作量
+// 远超它能证明的东西。所以这里用 `dart:io` 的 `ZLibCodec` 当参考实现。
+//
+// 这不是对「生成器不依赖被测代码」原则的妥协，反而是它最强的一次应用：
+// 压缩流出自 zlib 官方实现，我们手写的 inflate 能解开它，才说明 inflate
+// 真的实现了 RFC 1951 —— 而不只是能解开自家写出来的东西。
+//
+// 单元测试里的 PNG 一律用**存储块**（BTYPE=00），压根不碰 Huffman 路径。
+// 样图补上的正是这一块：zlib 以 level 9 输出的动态 Huffman 块。两者合起来
+// 才算把 inflate 的三种块类型都跑到了真实数据上。
+// ———————————————————————————————————————————————————————————————
+
+/// 大端 32 位。PNG 通篇网络字节序，和 BMP 的小端正好相反。
+void u32be(List<int> out, int v) {
+  out.add((v >> 24) & 0xFF);
+  out.add((v >> 16) & 0xFF);
+  out.add((v >> 8) & 0xFF);
+  out.add(v & 0xFF);
+}
+
+/// PNG chunk 的 CRC-32（多项式 0xEDB88320，反射形式）。
+///
+/// 逐位算，不建表 —— 生成样图不是热路径，而逐位的版本一眼能对上定义。
+int pngCrc32(List<int> data) {
+  int crc = 0xFFFFFFFF;
+  for (final int b in data) {
+    crc ^= b;
+    for (int i = 0; i < 8; i++) {
+      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+    }
+  }
+  return crc ^ 0xFFFFFFFF;
+}
+
+/// 拼一个 chunk：`长度(4) + 类型(4) + 数据 + CRC(4)`。
+///
+/// CRC 覆盖**类型 + 数据**，不含长度字段。范围记错的话所有 chunk 都对不上。
+List<int> pngChunk(String type, List<int> data) {
+  final List<int> out = <int>[];
+  u32be(out, data.length);
+  final List<int> typeAndData = <int>[...text(type), ...data];
+  out.addAll(typeAndData);
+  u32be(out, pngCrc32(typeAndData));
+  return out;
+}
+
+/// Paeth 预测器。独立写一遍，和解码器的实现互不参考。
+///
+/// 平局时的取舍顺序是 a > b > c —— 这个顺序不是随意的，编码和解码必须
+/// 完全一致，否则解出来的图会在特定像素上偏一两个数值。
+int paeth(int a, int b, int c) {
+  final int p = a + b - c;
+  final int pa = (p - a).abs();
+  final int pb = (p - b).abs();
+  final int pc = (p - c).abs();
+  if (pa <= pb && pa <= pc) {
+    return a;
+  }
+  return pb <= pc ? b : c;
+}
+
+/// 用第 [type] 号滤波器处理一行，返回滤波后的字节。
+///
+/// [prev] 是**已还原**的上一行（不是滤波后的）。第一行传全零 —— 规范
+/// 规定虚拟的第 0 行全是 0，这样 Up / Paeth 在首行也有定义。
+List<int> filterRow(List<int> row, List<int> prev, int bpp, int type) {
+  final int n = row.length;
+  final List<int> out = List<int>.filled(n, 0);
+  for (int i = 0; i < n; i++) {
+    final int a = i >= bpp ? row[i - bpp] : 0;
+    final int b = prev[i];
+    final int c = i >= bpp ? prev[i - bpp] : 0;
+    final int pred = switch (type) {
+      0 => 0,
+      1 => a,
+      2 => b,
+      3 => (a + b) >> 1, // 注意是 a + b 的和先算全精度再折半
+      4 => paeth(a, b, c),
+      _ => throw StateError('滤波器 $type 不存在'),
+    };
+    out[i] = (row[i] - pred) & 0xFF;
+  }
+  return out;
+}
+
+/// 逐行挑滤波器：五种都试，取「绝对值之和」最小的那个。
+///
+/// 这就是 libpng 的默认启发式。它的依据是：把字节当有符号数看，越接近 0
+/// 的值越集中，deflate 的 Huffman 就能给它们更短的码字。不是最优解（真正
+/// 的最优要试遍组合再压缩比大小），但便宜且效果好。
+///
+/// 逐行独立选择是关键 —— 一张图里不同区域的最佳滤波器往往不同，样图因此
+/// 天然会用上多种滤波器，正好把解码端五条分支都跑到。
+int pickFilter(List<int> row, List<int> prev, int bpp) {
+  int best = 0;
+  int bestScore = -1;
+  for (int type = 0; type < 5; type++) {
+    int score = 0;
+    for (final int v in filterRow(row, prev, bpp, type)) {
+      score += v < 128 ? v : 256 - v; // 当有符号数看的绝对值
+    }
+    if (bestScore < 0 || score < bestScore) {
+      bestScore = score;
+      best = type;
+    }
+  }
+  return best;
+}
+
+/// Adam7 的七遍参数：起始偏移与步长。手抄自规范，与解码端各存一份。
+const List<List<int>> adam7 = <List<int>>[
+  // xOffset, yOffset, xStep, yStep
+  <int>[0, 0, 8, 8],
+  <int>[4, 0, 8, 8],
+  <int>[0, 4, 4, 8],
+  <int>[2, 0, 4, 4],
+  <int>[0, 2, 2, 4],
+  <int>[1, 0, 2, 2],
+  <int>[0, 1, 1, 2],
+];
+
+/// 把「滤波类型字节 + 滤波后行数据」按行拼成 inflate 应输出的原始流。
+///
+/// [rows] 的每一项是一行**未滤波**的字节。滤波器逐行自动挑选。
+List<int> pngRaw(List<List<int>> rows, int bpp) {
+  final List<int> raw = <int>[];
+  List<int> prev = List<int>.filled(rows.isEmpty ? 0 : rows.first.length, 0);
+  for (final List<int> row in rows) {
+    final int type = pickFilter(row, prev, bpp);
+    raw.add(type);
+    raw.addAll(filterRow(row, prev, bpp, type));
+    prev = row;
+  }
+  return raw;
+}
+
+/// 组装一个完整 PNG。
+///
+/// [rows] 是逐行的**未滤波**字节。压缩交给 `ZLibCodec(level: 9)` —— 见本节
+/// 开头的说明。
+Uint8List buildPng({
+  required int width,
+  required int height,
+  required int bitDepth,
+  required int colorType,
+  required List<List<int>> rows,
+  List<int>? palette,
+  List<int>? transparency,
+  bool interlace = false,
+  List<List<int>>? extraChunks,
+}) {
+  final int channels = switch (colorType) {
+    0 => 1,
+    2 => 3,
+    3 => 1,
+    4 => 2,
+    6 => 4,
+    _ => throw StateError('色彩类型 $colorType 不存在'),
+  };
+  final int bitsPerPixel = channels * bitDepth;
+  final int bpp = bitsPerPixel < 8 ? 1 : bitsPerPixel ~/ 8;
+
+  final List<int> raw;
+  if (!interlace) {
+    raw = pngRaw(rows, bpp);
+  } else {
+    // 隔行时每一遍是一张独立的小图：行字节数按**本遍宽度**重算，
+    // 上一行缓冲在遍与遍之间重置。这两点是 Adam7 最容易写错的地方。
+    if (bitsPerPixel % 8 != 0) {
+      throw StateError('这个生成器只给字节对齐的位深做隔行');
+    }
+    raw = <int>[];
+    for (final List<int> p in adam7) {
+      final int px = p[0], py = p[1], sx = p[2], sy = p[3];
+      final List<List<int>> passRows = <List<int>>[];
+      for (int y = py; y < height; y += sy) {
+        final List<int> row = <int>[];
+        for (int x = px; x < width; x += sx) {
+          row.addAll(rows[y].sublist(x * bpp, (x + 1) * bpp));
+        }
+        passRows.add(row);
+      }
+      // 空遍连滤波字节都不写。小图上大多数遍是空的。
+      if (passRows.isEmpty || passRows.first.isEmpty) {
+        continue;
+      }
+      raw.addAll(pngRaw(passRows, bpp));
+    }
+  }
+
+  final List<int> out = <int>[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+  ];
+  final List<int> ihdr = <int>[];
+  u32be(ihdr, width);
+  u32be(ihdr, height);
+  ihdr.addAll(<int>[bitDepth, colorType, 0, 0, interlace ? 1 : 0]);
+  out.addAll(pngChunk('IHDR', ihdr));
+
+  if (palette != null) {
+    out.addAll(pngChunk('PLTE', palette));
+  }
+  if (transparency != null) {
+    out.addAll(pngChunk('tRNS', transparency));
+  }
+  for (final List<int> c in extraChunks ?? const <List<int>>[]) {
+    out.addAll(c);
+  }
+  out.addAll(pngChunk(
+    'IDAT',
+    ZLibCodec(level: 9).encode(raw),
+  ));
+  out.addAll(pngChunk('IEND', const <int>[]));
+  return Uint8List.fromList(out);
+}
+
+/// 大端 32 位，返回新列表。给 gAMA / pHYs 这类小字段用。
+List<int> be32(int v) {
+  final List<int> out = <int>[];
+  u32be(out, v);
+  return out;
+}
+
+/// RGB8 渐变，96×64，带 gAMA 与 tEXt。
+///
+/// 三个通道各按不同方向渐变。滤波器逐行自选，于是这张图里会同时出现
+/// 好几种 —— 正是单元测试里那些「一行一种滤波器」的手写用例覆盖不到的
+/// 真实混合情形。
+Uint8List pngRgb8Gradient() {
+  const int w = 96, h = 64;
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < h; y++) {
+    final List<int> row = <int>[];
+    for (int x = 0; x < w; x++) {
+      row.addAll(<int>[
+        x * 255 ~/ (w - 1),
+        y * 255 ~/ (h - 1),
+        (x + y) * 255 ~/ (w + h - 2),
+      ]);
+    }
+    rows.add(row);
+  }
+  return buildPng(
+    width: w,
+    height: h,
+    bitDepth: 8,
+    colorType: 2,
+    rows: rows,
+    extraChunks: <List<int>>[
+      // 0.45455 ≈ 1/2.2，老资料里最常见的值。
+      pngChunk('gAMA', be32(45455)),
+      // 3780 像素/米 ≈ 96 DPI。
+      pngChunk('pHYs', <int>[...be32(3780), ...be32(3780), 1]),
+      pngChunk('tEXt', <int>[
+        ...text('Software'),
+        0,
+        ...text('ImageViewer gen_samples.dart'),
+      ]),
+    ],
+  );
+}
+
+/// RGBA8 圆盘，64×64，alpha 从圆心向外渐隐。
+///
+/// 和 BMP 的 32bpp 样图刻意画同一个形状：两种格式表达同一张图，解出来的
+/// 像素应该几乎一样。这类跨格式对照比单格式自证更有说服力。
+Uint8List pngRgba8Disc() {
+  const int n = 64;
+  const double r = 30;
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < n; y++) {
+    final List<int> row = <int>[];
+    for (int x = 0; x < n; x++) {
+      final double dx = x - (n - 1) / 2;
+      final double dy = y - (n - 1) / 2;
+      final double d = math.sqrt(dx * dx + dy * dy);
+      // 圆内不透明，边缘一圈线性渐隐，圆外全透明。
+      final int a = d >= r ? 0 : (d <= r - 8 ? 255 : ((r - d) / 8 * 255).round());
+      row.addAll(<int>[
+        x * 255 ~/ (n - 1),
+        y * 255 ~/ (n - 1),
+        200,
+        a,
+      ]);
+    }
+    rows.add(row);
+  }
+  return buildPng(
+    width: n,
+    height: n,
+    bitDepth: 8,
+    colorType: 6,
+    rows: rows,
+  );
+}
+
+/// 8 位调色板 + tRNS，64×48。
+///
+/// tRNS 故意只给前 8 项，剩下的项按规范默认为 255（不透明）。「缺的项
+/// 补 0」是常见的写反 —— 那会让大半张图凭空变透明。
+Uint8List pngPalette8() {
+  const int w = 64, h = 48;
+  const int entries = 32;
+  final List<int> plte = <int>[];
+  for (int i = 0; i < entries; i++) {
+    // 一圈色相环，用整数算，不引入浮点色彩空间转换。
+    final int seg = i * 6 ~/ entries;
+    final int t = (i * 6 % entries) * 255 ~/ entries;
+    plte.addAll(switch (seg) {
+      0 => <int>[255, t, 0],
+      1 => <int>[255 - t, 255, 0],
+      2 => <int>[0, 255, t],
+      3 => <int>[0, 255 - t, 255],
+      4 => <int>[t, 0, 255],
+      _ => <int>[255, 0, 255 - t],
+    });
+  }
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < h; y++) {
+    rows.add(List<int>.generate(w, (int x) => (x * entries ~/ w)));
+  }
+  return buildPng(
+    width: w,
+    height: h,
+    bitDepth: 8,
+    colorType: 3,
+    rows: rows,
+    palette: plte,
+    transparency: List<int>.generate(8, (int i) => i * 32),
+  );
+}
+
+/// 16 位灰度渐变，64×64。
+///
+/// 每个采样两字节大端。这张图存在的意义是验证 16 → 8 的降位：低字节
+/// 若被直接丢弃（而不是四舍五入），渐变上会出现规律的台阶。
+Uint8List pngGray16() {
+  const int n = 64;
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < n; y++) {
+    final List<int> row = <int>[];
+    for (int x = 0; x < n; x++) {
+      final int v = (y * n + x) * 65535 ~/ (n * n - 1);
+      row.addAll(<int>[(v >> 8) & 0xFF, v & 0xFF]);
+    }
+    rows.add(row);
+  }
+  return buildPng(width: n, height: n, bitDepth: 16, colorType: 0, rows: rows);
+}
+
+/// 1 位灰度棋盘，一格 5 像素，35×24。
+///
+/// 宽度 35 不是 8 的倍数，故意的：每行 5 字节里最后 5 位是填充。行与行
+/// **不共享**字节，填充位的值无所谓 —— 若解码器把它们当像素，右边会多出
+/// 一条杂边。
+///
+/// 位序是 MSB 先：一字节的最高位是最左边那个像素。这和 deflate 数据字段
+/// 的 LSB 先正好相反，同一个文件里两种位序并存。
+Uint8List pngGray1() {
+  const int w = 35, h = 24;
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < h; y++) {
+    final List<int> row = List<int>.filled((w + 7) ~/ 8, 0);
+    for (int x = 0; x < w; x++) {
+      final bool on = ((x ~/ 5) + (y ~/ 5)) % 2 == 0;
+      if (on) {
+        row[x >> 3] |= 0x80 >> (x & 7);
+      }
+    }
+    rows.add(row);
+  }
+  return buildPng(width: w, height: h, bitDepth: 1, colorType: 0, rows: rows);
+}
+
+/// Adam7 隔行的 RGB8 同心环，64×64。
+///
+/// 隔行图的原始数据比非隔行的**更大** —— 七遍各自把行填充到字节边界，
+/// 填充累计起来超过了隔行带来的任何好处。Adam7 换来的是「下载一半就能看
+/// 出轮廓」，不是体积。
+Uint8List pngInterlaced() {
+  const int n = 64;
+  final List<List<int>> rows = <List<int>>[];
+  for (int y = 0; y < n; y++) {
+    final List<int> row = <int>[];
+    for (int x = 0; x < n; x++) {
+      final double dx = x - (n - 1) / 2;
+      final double dy = y - (n - 1) / 2;
+      final int d = math.sqrt(dx * dx + dy * dy).round();
+      final bool ring = (d ~/ 4) % 2 == 0;
+      row.addAll(ring
+          ? <int>[240, 60 + d * 2, 30]
+          : <int>[30, 30, 120 + d * 2]);
+    }
+    rows.add(row);
+  }
+  return buildPng(
+    width: n,
+    height: n,
+    bitDepth: 8,
+    colorType: 2,
+    rows: rows,
+    interlace: true,
+  );
+}
+
+// ———————————————————————————————————————————————————————————————
 // 入口
 // ———————————————————————————————————————————————————————————————
 
@@ -617,6 +1026,12 @@ void main() {
     'checker_20x16.pbm': pnmP4(),
     'ring_16x16_ascii.pbm': pnmP1(),
     'colorbars_96x64_i420_3frames.yuv': yuvColorBars(),
+    'gradient_96x64_rgb8.png': pngRgb8Gradient(),
+    'disc_64x64_rgba8.png': pngRgba8Disc(),
+    'hues_64x48_palette8.png': pngPalette8(),
+    'ramp_64x64_gray16.png': pngGray16(),
+    'checker_35x24_gray1.png': pngGray1(),
+    'rings_64x64_adam7.png': pngInterlaced(),
   };
 
   final List<String> names = samples.keys.toList()..sort();
