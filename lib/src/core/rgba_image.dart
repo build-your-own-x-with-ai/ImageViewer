@@ -102,9 +102,12 @@ class RgbaImage {
       throw RangeError('坐标 ($x, $y) 超出图像范围 ${width}x$height');
     }
     final int i = (y * width + x) * 4;
-    return (pixels[i] << 24) |
-        (pixels[i + 1] << 16) |
-        (pixels[i + 2] << 8) |
+    // 用乘法而不是 `<< 24`：Web 上位运算是 32 位**有符号**的，红色分量
+    // ≥ 0x80 时左移 24 位会得到负数，`pixelAt(...) == 0xFF0000FF` 这样的
+    // 断言在桌面上通过、在 Web 上失败。见 implementation.md 第 3.11 节。
+    return pixels[i] * 16777216 +
+        pixels[i + 1] * 65536 +
+        pixels[i + 2] * 256 +
         pixels[i + 3];
   }
 

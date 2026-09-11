@@ -87,6 +87,15 @@ void main() {
       expect(img.pixelAt(0, 0), 0x12345678);
     });
 
+    test('红色分量 ≥ 0x80 时结果仍是正数', () {
+      // 位运算在 Web 上是 32 位有符号的，`0xFF << 24` 会得到 -16777216。
+      // 这个断言在桌面上无论如何都过，它防的是 Web 上的回归。
+      final RgbaImage img = RgbaImage.alloc(1, 1);
+      img.setPixel(0, 0, 0xFF, 0x00, 0x00, 0xFF);
+      expect(img.pixelAt(0, 0), 0xFF0000FF);
+      expect(img.pixelAt(0, 0), greaterThan(0));
+    });
+
     test('行优先直排，无行填充', () {
       // 第二行第一个像素的字节偏移应是 width * 4。
       final RgbaImage img = RgbaImage.alloc(3, 2);
