@@ -1077,7 +1077,7 @@ void main() {
       // 这件事在第一时间报出来，而不是继续读出一堆无意义的 chunk。
       expect(
         () => decode(base(before: <List<int>>[
-          pngChunk('a1 !', const <int>[]),
+          pngChunk('a1\x00!', const <int>[]),
         ])),
         throwsA(
           isA<ImageDecodeException>().having(
