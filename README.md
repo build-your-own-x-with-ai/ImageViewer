@@ -24,22 +24,39 @@ Flutter 六平台（macOS / iOS / Android / Linux / Windows / Web）。
 |---|---|
 | **BMP** | 六个头部版本（CORE/INFO/V2/V3/V4/V5）、1/2/4/8 bpp 调色板、16 bpp（RGB555/565/4444/任意掩码）、24/32 bpp、RLE4/RLE8、自底向上与自顶向下 |
 | **PNG** | 自写 inflate（stored / 固定 / 动态 Huffman + LZ77）、五种滤波器、十五种色彩类型 × 位深组合、`tRNS` 透明、Adam7 隔行 |
+| **JPEG** | 基线与渐进（SOF0/1/2）、霍夫曼 + 字节填充 + 重启间隔、两套 IDCT、4:4:4 / 4:2:2 / 4:2:0 / 4:1:1、三角滤波上采样、YCbCr / RGB / Adobe CMYK-YCCK、EXIF 方向 |
 | **PNM** | P1–P6 全部六种，ASCII 与二进制，maxval 1–65535 |
 | **裸 YUV** | 九种布局（I420/YV12/I422/I444/NV12/NV21/YUY2/YVYU/UYVY）× BT.601/709/2020 × limited/full range，多帧序列 |
 
-JPEG / WebP 在计划里，见 `docs/plan.md`。
+WebP 在计划里，见 `docs/plan.md`。
 
-PNG 这一项里一多半的代码其实不是 PNG：它自己的语义只有 IHDR 十三个字节
-加五个滤波器，复杂度全外包给了 deflate —— 而 deflate 得自己写
-（`lib/src/compress/`，阶段 4 的 WebP 会复用）。
+后两个格式的难点来自相反的方向，这一点比覆盖范围本身更有意思：
+
+- **PNG 一多半的代码不是 PNG。** 它自己的语义只有 IHDR 十三个字节加五个
+  滤波器，复杂度全外包给了 deflate —— 而 deflate 得自己写
+  （`lib/src/compress/`，阶段 4 的 WebP 会复用）。
+- **JPEG 什么都不外包。** 3351 行全在 `codecs/jpeg/` 里面，而且它是唯一
+  没法写成流水线的格式：量化表和码表是**可变的当前状态**，熵数据**没有长度
+  字段**（扫描自己决定在哪结束），渐进模式下同一个块要被写好几遍。
+  解码器因此是台状态机，不是「读头部 → 读像素」。
 
 ## 跑起来
 
 ```bash
 flutter pub get
-dart tool/gen_samples.dart   # 生成十八张内置样图
 flutter run                  # 或 -d macos / -d chrome / …
 ```
+
+二十四张内置样图都在仓库里，不用生成。要重新生成的话：
+
+```bash
+dart tool/gen_samples.dart        # BMP / PNM / PNG / YUV 十八张
+bash tool/gen_jpeg_samples.sh     # JPEG 六张，需要 libjpeg-turbo
+```
+
+JPEG 单独一个脚本，因为**手写 JPEG 字节要先有一个编码器**（DCT + 量化 +
+霍夫曼，规模和解码器本体相当）。所以这六张拿 `cjpeg` 生成，顺带用
+`djpeg` 生成参考解码结果供测试比对。测试本身从不执行这些脚本。
 
 左侧「内置样图」点开即用 —— 空手启动也有东西看，这在 Web 和移动端是
 唯一的来源。
@@ -64,18 +81,26 @@ flutter run                  # 或 -d macos / -d chrome / …
 ## 测试
 
 ```bash
-flutter test      # 496 个
+flutter test      # 731 个
 flutter analyze   # 零告警
 ```
 
-十八张内置样图各自针对一个具体陷阱（行 4 字节对齐、自顶向下、RLE 增量跳转、
-YUV 尺寸错配、Adam7 七遍扫描、16 位缩放的取整方向……），
+二十四张内置样图各自针对一个具体陷阱（行 4 字节对齐、自顶向下、RLE 增量跳转、
+YUV 尺寸错配、Adam7 七遍扫描、16 位缩放的取整方向、渐进 JPEG 的十趟扫描……），
 `test/assets/samples_test.dart` 逐张验证它们确实还在踩那个陷阱 ——
 样图退化成「一张普通的图」就失去意义了。
 
-`docs/formats/png.md` 结尾那段 82 字节的十六进制转储也被钉进了测试：
-文档里逐字节标注的那张 2×2 PNG 必须真能解出预期结果，改了解码器而文档
-没跟上，测试会失败。
+有损格式还多一层：JPEG 按规范（ITU T.83）不要求 IDCT 位精确，所以容差得有
+依据。实测我们和 `djpeg -dct int` 在一张 q90 4:4:4 图上差 34 个通道（最大 2），
+而 **libjpeg 自己的两种 IDCT 差 67 个通道** —— 有了这个数，`tolerance: 2` 就
+不是调出来的魔数。量化越粗分歧越少，所以 4:2:0 和灰度那两张写的是
+`tolerance: 0`。
+
+文档里的字节也被钉进了测试，三种格式各有一组。`docs/formats/png.md` 结尾那张
+2×2 PNG 的 82 字节必须真能解出预期结果；`docs/formats/yuv.md` 那 12 个字节按
+I420 和按 NV12 解出来必须是不同的颜色；`docs/formats/jpeg.md` 里那张 482 字节
+灰度图，手算出的第一个 DC 系数（-182 → 整块 14.25）必须和 `djpeg` 输出的行均值
+相等。改了解码器而文档没跟上，测试会失败。
 
 ## 文档
 

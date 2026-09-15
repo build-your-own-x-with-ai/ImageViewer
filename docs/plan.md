@@ -13,8 +13,8 @@
 ## 阶段 1 — 地基 + BMP + PNM + YUV （`v0.1.0`）
 
 > 收口于 2026-09-07。五条标准：`flutter run` ✅ / 305 测试 ✅ /
-> analyze 零告警 ✅ / 文档同步 ✅ / **tag 漏了**（当时没打，`v0.1.0`
-> 事后补在 `889292a` 上）。
+> analyze 零告警 ✅ / 文档同步 ✅ / tag ✅（**当时漏了**，2026-09-10
+> 补打在 `889292a` 上）。
 >
 > 这一条漏了三天没人发现，正说明**完成标准得逐条记下来**，光写在文件
 > 开头当口号不够。所以从阶段 2 起每个阶段都留这么一段。
@@ -83,7 +83,7 @@
 ## 阶段 2 — PNG （`v0.2.0`）
 
 > 收口于 2026-09-10。五条标准：`flutter run` ✅ / 496 测试 ✅ /
-> analyze 零告警 ✅ / 文档同步 ✅ / tag `v0.2.0` ⏳（待打）。
+> analyze 零告警 ✅ / 文档同步 ✅ / tag `v0.2.0` ✅。
 >
 > 计划里这一阶段写作「PNG」，做下来发现一多半工作量在 `compress/`：
 > PNG 自己的语义只有 IHDR 十三个字节加五个滤波器，而 deflate 是一整个
@@ -114,17 +114,36 @@
 
 ## 阶段 3 — JPEG （`v0.3.0`）
 
-- [ ] marker 扫描：SOI / APPn / DQT / SOF0 / SOF2 / DHT / SOS / DRI / RSTn / COM / EOI
-- [ ] Huffman 解码（含字节填充与重启间隔）
-- [ ] 反量化 + zigzag 反序
-- [ ] `IdctNaive` 朴素二维定义式
-- [ ] `IdctAan` 快速蝶形
-- [ ] 任意采样因子 4:4:4 / 4:2:2 / 4:2:0 / 4:1:1
-- [ ] 色度上采样
-- [ ] YCbCr→RGB / 灰度 / Adobe CMYK-YCCK（APP14）
-- [ ] 渐进式 SOF2：DC 首扫与精化、AC 首扫与精化、EOB run、频谱选择
-- [ ] APP1 EXIF 方向
-- [ ] 测试 + `docs/formats/jpeg.md`
+> 收口于 2026-09-15。五条标准：`flutter run` ✅ / 731 测试 ✅ /
+> analyze 零告警 ✅ / 文档同步 ✅ / tag `v0.3.0` ✅。
+>
+> 计划里这一阶段的清单是按「功能点」列的，做下来发现真正的难点在**控制流**：
+> 前三种格式都是流水线，JPEG 是状态机 —— DQT/DHT 是可变的当前状态，
+> 熵数据没有长度字段，SOS 可以出现多次。`jpeg_scan.dart` 一个文件 678 行，
+> 占整个解码器的五分之一。详见 `implementation.md` 第 5 节。
+>
+> 另一处偏差是**样图没法手写**。前三种格式的样图用 `tool/gen_samples.dart`
+> 拼字节生成，JPEG 要先有编码器才行。所以改成拿 libjpeg-turbo 当参照
+> （`tool/gen_jpeg_samples.sh`），测试比对 `djpeg` 的输出。
+
+- [x] marker 扫描：SOI / APPn / DQT / SOF0 / SOF2 / DHT / SOS / DRI / RSTn / COM / EOI
+- [x] Huffman 解码（含字节填充与重启间隔）
+- [x] 反量化 + zigzag 反序
+- [x] `IdctNaive` 朴素二维定义式
+- [x] `IdctFast` 快速蝶形（清单原写 `IdctAan`，实现的是 **LLM** 算法 ——
+      真 AAN 要把缩放因子预乘进量化表，会让 IDCT 和反量化耦合。见
+      `jpeg_idct.dart` 类文档）
+- [x] 任意采样因子 4:4:4 / 4:2:2 / 4:2:0 / 4:1:1（倍数由 `maxH/h` 反算，
+      非整数倍也吃得下）
+- [x] 色度上采样（三角滤波用于 h2v1/h2v2，其余倍数最近邻 —— 照抄 libjpeg
+      的分派，否则没法和 `djpeg` 逐字节比对）
+- [x] YCbCr→RGB / 灰度 / Adobe CMYK-YCCK（APP14）
+- [x] 色彩空间推断（JPEG 不声明色彩空间，照抄 libjpeg 的
+      `default_decompress_parms`：JFIF 优先级高于 `'R''G''B'` 分量 ID）
+- [x] 渐进式 SOF2：DC 首扫与精化、AC 首扫与精化、EOB run、频谱选择
+- [x] APP1 EXIF 方向（八种取值 = D4 群，分解成三个布尔量）
+- [x] 六张 JPEG 样图 + 五份 `djpeg` 参考解码（`test/assets/expected/`）
+- [x] 测试（223 个）+ `docs/formats/jpeg.md`
 
 ## 阶段 4 — WebP （`v0.4.0`）
 
