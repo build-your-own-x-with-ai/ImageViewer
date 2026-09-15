@@ -175,6 +175,42 @@ class BitReaderMsb {
     _bitBuffer = 0;
   }
 
+  /// 在重启间隔的边界上跳过一个 RSTn marker，返回是否真的跳过了。
+  ///
+  /// 为什么不能只靠 [consumePendingMarker]：到达边界时 marker **可能还没被
+  /// 发现**。位缓冲一次能预取 3 个字节，所以填充位有时已经进了缓冲、有时
+  /// 还没读到；前者 [hitMarker] 为真，后者 `_pos` 正停在 marker 的 `0xFF` 上。
+  /// 两种情形都合法，这个方法把它们统一掉。
+  ///
+  /// 丢掉缓冲里的散位是安全的：边界处所有数据位都已消费完，剩下的一定是
+  /// 编码器补的填充位（不足一字节，全 1）。
+  ///
+  /// 找不到 RSTn 就返回 false 而**不报错** —— 那说明重启间隔算错了或数据
+  /// 损坏，调用方重置预测值后继续解，最坏是后半张图发灰，比整张打不开好。
+  bool skipRestartMarker() {
+    if (_pendingMarker != null) {
+      if (_pendingMarker! >= 0xD0 && _pendingMarker! <= 0xD7) {
+        consumePendingMarker();
+        return true;
+      }
+      return false; // 别的 marker：这一段扫描本来就该结束了
+    }
+    alignToByte();
+    int p = _pos;
+    // marker 前允许任意多个 0xFF 填充。
+    while (p + 1 < bytes.length && bytes[p] == 0xFF && bytes[p + 1] == 0xFF) {
+      p++;
+    }
+    if (p + 1 < bytes.length &&
+        bytes[p] == 0xFF &&
+        bytes[p + 1] >= 0xD0 &&
+        bytes[p + 1] <= 0xD7) {
+      _pos = p + 2;
+      return true;
+    }
+    return false;
+  }
+
   /// 越过已检测到的 marker，继续读下一段熵数据。
   ///
   /// 用于 RSTn：调用后清空位缓冲、跳过 `FF Dn` 两个字节、重置 marker 状态。

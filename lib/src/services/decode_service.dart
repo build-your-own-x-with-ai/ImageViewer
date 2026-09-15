@@ -4,6 +4,7 @@ import 'dart:isolate';
 // Uint8List 由 foundation 转出，不必再单独 import dart:typed_data。
 import 'package:flutter/foundation.dart';
 import 'package:image_viewer/src/codecs/bmp/bmp_decoder.dart';
+import 'package:image_viewer/src/codecs/jpeg/jpeg_decoder.dart';
 import 'package:image_viewer/src/codecs/png/png_decoder.dart';
 import 'package:image_viewer/src/codecs/pnm/pnm_decoder.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_decoder.dart';
@@ -22,6 +23,7 @@ import 'package:image_viewer/src/core/rgba_image.dart';
 DecoderRegistry buildRegistry() => DecoderRegistry(const <ImageDecoder>[
       BmpDecoder(),
       PngDecoder(),
+      JpegDecoder(),
       PnmDecoder(),
       YuvDecoder(),
     ]);

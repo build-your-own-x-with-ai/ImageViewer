@@ -497,6 +497,7 @@ const List<XTypeGroup> _typeGroups = <XTypeGroup>[
     extensions: <String>[
       'bmp', 'dib', // BMP
       'png', // PNG（APNG 会当成第一帧打开，所以不列 .apng）
+      'jpg', 'jpeg', 'jpe', 'jfif', // JPEG
       'pnm', 'pbm', 'pgm', 'ppm', // PNM
       'yuv', 'raw', 'i420', 'yv12', 'nv12', 'nv21', 'yuy2', 'uyvy', // 裸 YUV
     ],
