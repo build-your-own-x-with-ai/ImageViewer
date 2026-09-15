@@ -25,6 +25,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_viewer/src/codecs/bmp/bmp_decoder.dart';
+import 'package:image_viewer/src/codecs/jpeg/jpeg_decoder.dart';
 import 'package:image_viewer/src/codecs/png/png_decoder.dart';
 import 'package:image_viewer/src/codecs/pnm/pnm_decoder.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_color.dart';
@@ -42,10 +43,25 @@ const BmpDecoder bmpDecoder = BmpDecoder();
 const PngDecoder pngDecoder = PngDecoder();
 const PnmDecoder pnmDecoder = PnmDecoder();
 const YuvDecoder yuvDecoder = YuvDecoder();
+const JpegDecoder jpegDecoder = JpegDecoder();
 
 /// 读一个样图。`flutter test` 的工作目录是包根目录，所以相对路径可用。
 Uint8List load(String name) =>
     File('assets/samples/$name').readAsBytesSync();
+
+/// 读一份 djpeg 参考并解出来。这些 PNM 不进 assets/ —— 它们只服务测试，
+/// 打进 App 包只是白占体积。
+RgbaImage loadExpected(String name) =>
+    pnmDecoder.decode(File('test/assets/expected/$name').readAsBytesSync());
+
+/// 有 djpeg 参考的那五张样图（不含 EXIF 那张，它复用 q75_420 的参考）。
+const List<String> jpegExpectedPnm = <String>[
+  'gradient_64x32_q85_gray.pnm',
+  'gradient_64x48_q75_420.pnm',
+  'gradient_64x48_q80_422rst.pnm',
+  'gradient_64x48_q80_prog.pnm',
+  'gradient_64x48_q90_444.pnm',
+];
 
 /// 两行像素是否完全相同。
 ///
@@ -76,7 +92,13 @@ void main() {
       'disc_64x64_rgba8.png',
       'gradient_61x40_24bpp.bmp',
       'gradient_64x32.pgm',
+      'gradient_64x32_q85_gray.jpg',
       'gradient_64x48.ppm',
+      'gradient_64x48_exif6.jpg',
+      'gradient_64x48_q75_420.jpg',
+      'gradient_64x48_q80_422rst.jpg',
+      'gradient_64x48_q80_prog.jpg',
+      'gradient_64x48_q90_444.jpg',
       'gradient_96x64_rgb8.png',
       'hues_64x48_palette8.png',
       'rainbow_128x40_8bpp.bmp',
@@ -88,14 +110,26 @@ void main() {
       'topdown_61x40_24bpp.bmp',
     ];
 
-    test('18 个样图都在，且都不是空文件', () {
+    test('24 个样图都在，且都不是空文件', () {
       for (final String name in expected) {
+        // JPEG 那六张由 tool/gen_jpeg_samples.sh 产出（cjpeg 压的），
+        // 其余由 tool/gen_samples.dart 逐字节写出。缺哪张就跑对应的那个。
+        final String how = name.endsWith('.jpg')
+            ? 'bash tool/gen_jpeg_samples.sh'
+            : 'dart run tool/gen_samples.dart';
         final File f = File('assets/samples/$name');
-        expect(
-          f.existsSync(),
-          isTrue,
-          reason: '缺少样图 $name —— 跑一下 dart run tool/gen_samples.dart',
-        );
+        expect(f.existsSync(), isTrue, reason: '缺少样图 $name —— 跑一下 $how');
+        expect(f.lengthSync(), greaterThan(0), reason: '$name 是空文件');
+      }
+    });
+
+    test('5 份 djpeg 参考都在', () {
+      // JPEG 是有损的，期望值没法写成手算字面量（见 tool/gen_jpeg_samples.sh
+      // 开头的说明），所以改成和 libjpeg-turbo 的解码结果逐通道比。
+      for (final String name in jpegExpectedPnm) {
+        final File f = File('test/assets/expected/$name');
+        expect(f.existsSync(), isTrue,
+            reason: '缺少参考 $name —— 跑一下 bash tool/gen_jpeg_samples.sh');
         expect(f.lengthSync(), greaterThan(0), reason: '$name 是空文件');
       }
     });
@@ -1049,6 +1083,250 @@ void main() {
     });
   });
 
+  group('JPEG 与 libjpeg-turbo 的交叉验证', () {
+    // 这一组和上面各组的路子不同。上面的期望值都是手算字面量 —— JPEG 做不到
+    // 这件事：DCT + 量化的结果没法在注释里手算。所以换成两个独立参考：
+    //
+    //   1. djpeg 的解码结果（test/assets/expected/*.pnm）。这是「和最权威的
+    //      实现算得一样吗」。容差 2 —— 见下面 444 那条的说明。
+    //   2. 压缩前的原图（assets/samples/gradient_64x48.ppm）。这是「解出来的
+    //      还是那张图吗」。它能抓住 djpeg 比对抓不到的一类错：如果我们和
+    //      djpeg 都错了同一步，只有原图能看出来。
+    //
+    // 光有 (1) 是不够的：我们和 libjpeg 共享同一套算法族，一起错是可能的。
+    // 光有 (2) 也不够：量化损失把容差撑到 8，那么松的比对漏得过不少 bug。
+
+    late final RgbaImage source = pnmDecoder.decode(load('gradient_64x48.ppm'));
+    late final RgbaImage sourceGray =
+        pnmDecoder.decode(load('gradient_64x32.pgm'));
+
+    test('基线 4:4:4（q90）', () {
+      final RgbaImage img = jpegDecoder.decode(load('gradient_64x48_q90_444.jpg'));
+      expect(img.width, 64);
+      expect(img.height, 48);
+      expect(img.metadata.variant, '基线（SOF0）');
+      expect(img.metadata.colorSpace, 'YCbCr (BT.601)');
+      expect(img.metadata.extra['采样'], '4:4:4');
+      expect(img.metadata.extra['扫描趟数'], 1);
+
+      // 容差 2 的来历：我们的 IDCT 和 libjpeg 的 islow 都是整数近似，末位
+      // 舍入不同。实测 9216 个通道里有 34 个差 1~2。这不是缺陷 —— libjpeg
+      // 自己的 islow 和 float 两个 IDCT 在这张图上差了 67 个通道，比我们和
+      // 它的差距还大。ITU T.83 给的合规判据本来就是容差，不是逐位相同。
+      expectImageMatches(img, loadExpected('gradient_64x48_q90_444.pnm'),
+          tolerance: 2, reason: '与 djpeg 的解码结果比');
+
+      // q90 的量化损失。B 通道原图恒为 96，色度全图一致所以损失最小。
+      expectImageMatches(img, source,
+          tolerance: 4, reason: 'q90 压缩前后');
+    });
+
+    test('基线 4:2:0（q75）—— 与 djpeg 逐字节相同', () {
+      final RgbaImage img = jpegDecoder.decode(load('gradient_64x48_q75_420.jpg'));
+      expect(img.metadata.extra['采样'], '4:2:0');
+      expect(img.metadata.extra['采样因子'], '2x2 1x1 1x1');
+      expect(img.metadata.extra['MCU'], '16x16（4x3 个）');
+
+      // 容差 0。这条是整组里最有价值的一个断言：色度平面只有 32x24，要经过
+      // **三角滤波升采样**才铺回 64x48，而结果和 libjpeg 一个字节都不差。
+      // 也就是说 IDCT 和 fancy upsampling 两级同时被钉住了。
+      //
+      // 为什么 q75 能对齐而 q90 不能：量化越粗，非零系数越少，IDCT 的末位
+      // 分歧就越没有机会显形。
+      expectImageMatches(img, loadExpected('gradient_64x48_q75_420.pnm'),
+          reason: '与 djpeg 的解码结果必须逐字节相同');
+
+      // 色度抽掉四分之三，损失比 444 大一倍。
+      expectImageMatches(img, source, tolerance: 8, reason: 'q75 4:2:0 压缩前后');
+    });
+
+    test('基线 4:2:2 + 重启间隔（q80）', () {
+      final RgbaImage img =
+          jpegDecoder.decode(load('gradient_64x48_q80_422rst.jpg'));
+      expect(img.metadata.extra['采样'], '4:2:2');
+      // cjpeg -restart 2 是「每 2 行 MCU 一个」，这张图一行 4 个 MCU。
+      expect(img.metadata.extra['重启间隔'], '8 个 MCU');
+      expectImageMatches(img, loadExpected('gradient_64x48_q80_422rst.pnm'),
+          tolerance: 2, reason: '与 djpeg 的解码结果比');
+      expectImageMatches(img, source, tolerance: 6, reason: 'q80 4:2:2 压缩前后');
+    });
+
+    test('渐进（q80，10 趟扫描）', () {
+      final RgbaImage img = jpegDecoder.decode(load('gradient_64x48_q80_prog.jpg'));
+      expect(img.metadata.variant, '渐进（SOF2）');
+      // cjpeg 的默认渐进脚本：DC 首趟 + DC 细化 + 每个分量的 AC 首趟与细化。
+      // 10 趟意味着 DC首/DC细化/AC首/AC细化四条路径全都跑到了 —— 手搓的
+      // 位流很难覆盖这么全，这是这张样图的主要价值。
+      expect(img.metadata.extra['扫描趟数'], 10);
+      expectImageMatches(img, loadExpected('gradient_64x48_q80_prog.pnm'),
+          tolerance: 2, reason: '与 djpeg 的解码结果比');
+      expectImageMatches(img, source, tolerance: 8, reason: 'q80 渐进压缩前后');
+    });
+
+    test('灰度（q85）—— 与 djpeg 逐字节相同', () {
+      final RgbaImage img = jpegDecoder.decode(load('gradient_64x32_q85_gray.jpg'));
+      expect(img.width, 64);
+      expect(img.height, 32);
+      expect(img.metadata.channels, 1);
+      expect(img.metadata.colorSpace, 'Grayscale');
+      expect(img.metadata.extra['采样'], '单分量（灰度）');
+      // 灰度没有色彩变换、没有升采样，只剩 IDCT。逐字节相同。
+      expectImageMatches(img, loadExpected('gradient_64x32_q85_gray.pnm'),
+          reason: '与 djpeg 的解码结果必须逐字节相同');
+      expectImageMatches(img, sourceGray, tolerance: 1, reason: 'q85 灰度压缩前后');
+
+      // R=G=B —— 灰度图三通道必须一致。
+      for (int x = 0; x < 64; x += 7) {
+        final List<int> px = img.channelsAt(x, 16);
+        expect(px[0], px[1], reason: 'x=$x 的 R 与 G');
+        expect(px[1], px[2], reason: 'x=$x 的 G 与 B');
+        expect(px[3], 255);
+      }
+    });
+
+    test('EXIF 方向 6：宽高互换，像素按顺时针 90° 落位', () {
+      // 这张图是 q75_420 那张原封不动地在 SOI 后面插了一个 APP1 段，熵数据
+      // 一字节没动。所以旋转前的像素与那张严格相同 —— 期望值可以从那张推出来，
+      // 不必依赖 applyOrientation 自己（它的八种映射由 jpeg_exif_test 钉住）。
+      final RgbaImage img = jpegDecoder.decode(load('gradient_64x48_exif6.jpg'));
+      final RgbaImage base = jpegDecoder.decode(load('gradient_64x48_q75_420.jpg'));
+
+      expect(img.width, 48, reason: '方向 6 换宽高');
+      expect(img.height, 64);
+      expect(img.metadata.extra['EXIF 方向'], '6（顺时针 90°）');
+
+      // 顺时针 90°：原图第 0 列（x=0）变成新图第 0 行，且原图底部走在前面。
+      // 即 新(dx, dy) = 原(dy, H-1-dx)。
+      for (int dy = 0; dy < 64; dy++) {
+        for (int dx = 0; dx < 48; dx++) {
+          expect(img.channelsAt(dx, dy), base.channelsAt(dy, 47 - dx),
+              reason: '新图 ($dx, $dy) 应取自原图 ($dy, ${47 - dx})');
+        }
+      }
+
+      // 顺手钉一个角，免得上面那个循环里的映射写反了还自证自洽：
+      // 原图左下角（x=0, y=47）→ 新图左上角。原图 G = 255·47/47 = 255。
+      expectPixel(img, 0, 0, base.channelsAt(0, 47), reason: '原图左下 → 新图左上');
+    });
+  });
+
+  group('文档里那张 482 字节的灰度图', () {
+    // `docs/formats/jpeg.md`「字节级实例」一节把这张样图逐段拆开讲了一遍，
+    // 还手算了第一个 DC 系数。那一节里的每个数字都在这里被断言 —— 段偏移、
+    // 量化表第 0 项、SOF0 的 9 个载荷字节、类别 8 → -182 → -910 → 14.25
+    // 这条链。文档和代码要么一起对，要么一起红，不会悄悄脱节。
+    //
+    // 这一组和 png_test.dart 的「文档里那张 2×2 的例图」、yuv_test.dart 的
+    // 「文档里的字节级实例」是同一个用途。
+    final Uint8List d = load('gradient_64x32_q85_gray.jpg');
+
+    test('总长与各段偏移和文档的转储左栏一致', () {
+      expect(d.length, 482, reason: '文档说共 482 字节');
+
+      expect(d.sublist(0x00, 0x02), equals(<int>[0xFF, 0xD8]), reason: 'SOI');
+      expect(d.sublist(0x02, 0x04), equals(<int>[0xFF, 0xE0]), reason: 'APP0');
+      expect(d.sublist(0x14, 0x16), equals(<int>[0xFF, 0xDB]), reason: 'DQT');
+      expect(d.sublist(0x59, 0x5B), equals(<int>[0xFF, 0xC0]), reason: 'SOF0');
+      expect(d.sublist(0x66, 0x68), equals(<int>[0xFF, 0xC4]),
+          reason: 'DHT（DC 表）');
+      expect(d.sublist(0x87, 0x89), equals(<int>[0xFF, 0xC4]),
+          reason: 'DHT（AC 表）');
+      expect(d.sublist(0x13E, 0x140), equals(<int>[0xFF, 0xDA]), reason: 'SOS');
+      expect(d.sublist(0x1E0, 0x1E2), equals(<int>[0xFF, 0xD9]), reason: 'EOI');
+
+      // 上面那串偏移不是抄来的，是长度字段一段一段链出来的。链子对不上，
+      // 说明文档的转储和文件本身已经不是一回事了。
+      expect(0x02 + 2 + ((d[0x04] << 8) | d[0x05]), 0x14, reason: 'APP0 → DQT');
+      expect(0x14 + 2 + ((d[0x16] << 8) | d[0x17]), 0x59, reason: 'DQT → SOF0');
+      expect(0x59 + 2 + ((d[0x5B] << 8) | d[0x5C]), 0x66, reason: 'SOF0 → DHT');
+    });
+
+    test('SOF0 的 9 个载荷字节：8 位精度、32 行、64 列、单分量 1×1', () {
+      expect(
+          d.sublist(0x5D, 0x66),
+          equals(<int>[
+            0x08, // 精度 8 位
+            0x00, 0x20, // 高 = 32
+            0x00, 0x40, // 宽 = 64
+            0x01, // 分量数 = 1（灰度）
+            0x01, 0x11, 0x00, // id 1、抽样 1×1、量化表 0
+          ]));
+
+      // 解码器读出来的必须是同一件事。
+      final RgbaImage img = jpegDecoder.decode(d);
+      expect(img.width, 64);
+      expect(img.height, 32);
+    });
+
+    test('DQT 按 zigzag 存，第 0 项（DC 的除数）是 5', () {
+      expect(d[0x18], 0x00, reason: 'Pq=0（8 位）、Tq=0（表号 0）');
+      expect(d[0x19], 5, reason: '文档手算 DC 时乘的就是这个 5');
+      expect((d[0x16] << 8) | d[0x17], 67, reason: '2 + 1 + 64');
+    });
+
+    test('手算第一个 DC 系数：类别 8 → -182 → -910 → 整块 14.25', () {
+      // 熵数据紧跟在 SOS 头后面 —— SOS 是最后一个有长度字段的段。
+      const int entropy = 0x148;
+      expect(0x13E + 2 + ((d[0x140] << 8) | d[0x141]), entropy);
+      expect(d.sublist(entropy, entropy + 4),
+          equals(<int>[0xF9, 0x27, 0x47, 0xFE]));
+
+      // 从 entropy 起按 MSB 优先取第 i 个位。
+      int bitAt(int i) => (d[entropy + (i >> 3)] >> (7 - (i & 7))) & 1;
+
+      // 前 6 位 111110 查 DC 表得类别 8（DC 表就在 0x66 那一段里）。
+      int code = 0;
+      for (int i = 0; i < 6; i++) {
+        code = (code << 1) | bitAt(i);
+      }
+      expect(code, 0x3E, reason: '111110');
+
+      // 紧接着 8 个裸位。最高位是 0 ⇒ 负数，走 extend：v - 2^n + 1。
+      int raw = 0;
+      for (int i = 6; i < 14; i++) {
+        raw = (raw << 1) | bitAt(i);
+      }
+      expect(raw, 0x49, reason: '01001001 = 73');
+      expect(bitAt(6), 0, reason: '最高位 0 才走负数分支');
+      final int diff = raw - (1 << 8) + 1;
+      expect(diff, -182, reason: '73 - 256 + 1');
+
+      // 第一块没有前驱，所以 DC 就是 diff 本身。乘量化表第 0 项。
+      final int dc = diff * d[0x19];
+      expect(dc, -910);
+
+      // 只有 DC 的块 IDCT 出来是常数 DC/8 + 128。这张图的 AC 不为零，但
+      // 所有 AC 基函数在整块上求和为零 —— 所以块均值只由 DC 决定。
+      expect(dc / 8 + 128, 14.25);
+    });
+
+    test('解码器算出来的块 0 均值就是 14.25', () {
+      final RgbaImage img = jpegDecoder.decode(d);
+
+      // 文档引的是 djpeg 第 0 行的前 8 个像素。
+      const List<int> row0 = <int>[0, 4, 9, 13, 16, 20, 24, 28];
+      for (int x = 0; x < 8; x++) {
+        expect(img.channelsAt(x, 0)[0], row0[x], reason: '第 0 行 x=$x');
+      }
+
+      int sum = 0;
+      for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+          sum += img.channelsAt(x, y)[0];
+        }
+      }
+      expect(sum, 912, reason: '64 个样本');
+      expect(sum / 64, 14.25, reason: '与手算的 DC/8 + 128 相等');
+
+      // 渐变只沿 x 变化，所以块里 8 行的前 8 个像素完全相同。
+      // 这也是「行均值 == 块均值」这个对照成立的前提。
+      for (int y = 1; y < 8; y++) {
+        expect(img.channelsAt(3, y)[0], img.channelsAt(3, 0)[0],
+            reason: '第 $y 行应和第 0 行相同');
+      }
+    });
+  });
+
   group('通过注册表解码 —— 走的是 App 真正的那条路', () {
     // 上面各组都是直接调具体解码器。这一组用 buildRegistry()，也就是
     // decode_service 里 App 实际使用的那个注册表：先魔数嗅探，再分派。
@@ -1056,8 +1334,15 @@ void main() {
     // 意义在于：某个解码器的 canDecode 写错了，上面全绿而 App 里打不开图。
     final DecoderRegistry registry = buildRegistry();
 
-    test('五张 BMP、六张 PNM 与六张 PNG 都能被嗅探出来', () {
+    test('五张 BMP、六张 PNM、六张 PNG 与六张 JPEG 都能被嗅探出来', () {
       const Map<String, List<int>> expected = <String, List<int>>{
+        'gradient_64x48_q90_444.jpg': <int>[64, 48],
+        'gradient_64x48_q75_420.jpg': <int>[64, 48],
+        'gradient_64x48_q80_422rst.jpg': <int>[64, 48],
+        'gradient_64x48_q80_prog.jpg': <int>[64, 48],
+        'gradient_64x32_q85_gray.jpg': <int>[64, 32],
+        // 方向 6：注册表报出来的必须是转过之后的宽高。
+        'gradient_64x48_exif6.jpg': <int>[48, 64],
         'gradient_61x40_24bpp.bmp': <int>[61, 40],
         'topdown_61x40_24bpp.bmp': <int>[61, 40],
         'rainbow_128x40_8bpp.bmp': <int>[128, 40],
