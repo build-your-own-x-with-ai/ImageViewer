@@ -7,6 +7,7 @@ import 'package:image_viewer/src/codecs/bmp/bmp_decoder.dart';
 import 'package:image_viewer/src/codecs/jpeg/jpeg_decoder.dart';
 import 'package:image_viewer/src/codecs/png/png_decoder.dart';
 import 'package:image_viewer/src/codecs/pnm/pnm_decoder.dart';
+import 'package:image_viewer/src/codecs/webp/webp_decoder.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_decoder.dart';
 import 'package:image_viewer/src/codecs/yuv/yuv_options.dart';
 import 'package:image_viewer/src/core/decoder_registry.dart';
@@ -24,6 +25,7 @@ DecoderRegistry buildRegistry() => DecoderRegistry(const <ImageDecoder>[
       BmpDecoder(),
       PngDecoder(),
       JpegDecoder(),
+      WebpDecoder(),
       PnmDecoder(),
       YuvDecoder(),
     ]);
