@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:image_viewer/src/ui/checkerboard.dart';
 import 'package:image_viewer/src/ui/image_bridge.dart';
@@ -87,10 +85,7 @@ class _ImageCanvasState extends State<ImageCanvas> {
   void _applyMode(Size viewport) {
     final double iw = widget.image.width.toDouble();
     final double ih = widget.image.height.toDouble();
-    print('📐 _applyMode: viewport=${viewport.width}x${viewport.height}, '
-        'image=${iw}x$ih, mode=$_mode');
     if (iw <= 0 || ih <= 0) {
-      print('⚠️  图像尺寸无效');
       return;
     }
 
@@ -102,7 +97,6 @@ class _ImageCanvasState extends State<ImageCanvas> {
       ViewMode.fill => sx > sy ? sx : sy,
       ViewMode.actual => 1.0,
     };
-    print('   sx=$sx, sy=$sy, scale=$scale');
 
     _setScaleCentered(scale.clamp(_minScale, _maxScale), viewport);
   }
@@ -115,21 +109,10 @@ class _ImageCanvasState extends State<ImageCanvas> {
     // 让图像中心落在视口中心：先缩放，再把缩放后的图挪到中间。
     final double tx = viewport.width / 2 - scale * iw / 2;
     final double ty = viewport.height / 2 - scale * ih / 2;
-    print('   tx=$tx, ty=$ty (缩放后图像尺寸 ${scale * iw}x${scale * ih})');
 
-    // Matrix4 是列优先存储的 4x4 矩阵
-    // 变换顺序：先平移后缩放（因为 Matrix4 的 translate/scale 方法是右乘）
-    final Matrix4 matrix = Matrix4.identity();
-    matrix.translate(tx, ty);
-    matrix.scale(scale, scale, 1.0);
-    _controller.value = matrix;
-
-    // 打印矩阵的实际存储值（16个 double，列优先）
-    final Float64List storage = matrix.storage;
-    print('   矩阵存储: [0-3]=${storage.sublist(0, 4)}, '
-        '[4-7]=${storage.sublist(4, 8)}, '
-        '[8-11]=${storage.sublist(8, 12)}, '
-        '[12-15]=${storage.sublist(12, 16)}');
+    _controller.value = Matrix4.identity()
+      ..translate(tx, ty)
+      ..scale(scale);
   }
 
   /// 按倍数缩放，锚点是视口中心。
@@ -172,11 +155,7 @@ class _ImageCanvasState extends State<ImageCanvas> {
         return Stack(
           children: <Widget>[
             Positioned.fill(child: _buildViewer(viewport)),
-            Positioned(
-              right: 12,
-              bottom: 12,
-              child: _buildControls(context),
-            ),
+            Positioned(right: 12, bottom: 12, child: _buildControls(context)),
           ],
         );
       },
@@ -195,26 +174,36 @@ class _ImageCanvasState extends State<ImageCanvas> {
       // 图像本身不裁剪，由外层 ClipRect 控制 —— InteractiveViewer 自己裁
       // 会把上面那个无限 boundaryMargin 也算进去，反而出问题。
       clipBehavior: Clip.none,
-      // 监听 InteractiveViewer 的变换更新
-      onInteractionEnd: (ScaleEndDetails details) {
-        // 交互结束后读取最终矩阵
-        final Matrix4 finalMatrix = _controller.value;
-        final Float64List storage = finalMatrix.storage;
-        print('🔍 交互结束后的矩阵: [12-15]=${storage.sublist(12, 16)}');
-      },
-      child: SizedBox(
-        width: widget.image.width.toDouble(),
-        height: widget.image.height.toDouble(),
-        child: CustomPaint(
-          // 棋盘格垫在图下面，且只在真有透明像素时画。
-          painter: widget.image.hasTransparency
-              ? const CheckerboardPainter()
-              : null,
-          child: RawImage(
-            image: widget.image.texture,
-            filterQuality: FilterQuality.medium,
-          ),
-        ),
+      child: ValueListenableBuilder<Matrix4>(
+        valueListenable: _controller,
+        builder: (BuildContext context, Matrix4 matrix, Widget? child) {
+          final double scale = matrix.getMaxScaleOnAxis();
+          return SizedBox(
+            width: widget.image.width.toDouble(),
+            height: widget.image.height.toDouble(),
+            child: CustomPaint(
+              // 棋盘格垫在图下面，且只在真有透明像素时画。
+              painter: widget.image.hasTransparency
+                  ? const CheckerboardPainter()
+                  : null,
+              child: RawImage(
+                image: widget.image.texture,
+                // **放大用最近邻、缩小用线性**，这是本项目的关键渲染决策。
+                //
+                // 放大时若用插值，相邻像素会被抹成渐变 —— 而「像素的边界在
+                // 哪」正是我们要看的东西（解码错位表现为一道斜纹，插值之后
+                // 就成了一片模糊）。所以 scale >= 1 时一律 none，保证一个
+                // 图像像素是一个实心方块。
+                //
+                // 缩小时反过来：不插值会走样，一张 4000 宽的图缩到 800
+                // 会出现摩尔纹，那是采样假象、不是解码结果。
+                filterQuality: scale >= 1.0
+                    ? FilterQuality.none
+                    : FilterQuality.medium,
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -239,10 +228,7 @@ class _ImageCanvasState extends State<ImageCanvas> {
                 isSelected: _mode == mode,
                 onPressed: () => _switchMode(mode),
               ),
-            const SizedBox(
-              height: 24,
-              child: VerticalDivider(width: 12),
-            ),
+            const SizedBox(height: 24, child: VerticalDivider(width: 12)),
             IconButton(
               icon: const Icon(Icons.remove),
               iconSize: 20,
