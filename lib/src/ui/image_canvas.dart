@@ -105,8 +105,8 @@ class _ImageCanvasState extends State<ImageCanvas> {
     final double ty = viewport.height / 2 - scale * ih / 2;
 
     _controller.value = Matrix4.identity()
-      ..translateByDouble(tx, ty, 0, 1)
-      ..scaleByDouble(scale, scale, 1, 1);
+      ..translate(tx, ty, 0.0)
+      ..scale(scale, scale, 1.0);
   }
 
   /// 按倍数缩放，锚点是视口中心。
