@@ -53,6 +53,13 @@ class _ImageCanvasState extends State<ImageCanvas> {
   Size? _viewport;
 
   @override
+  void initState() {
+    super.initState();
+    // 确保初始有一个单位矩阵，避免首次渲染时出现空白
+    _controller.value = Matrix4.identity();
+  }
+
+  @override
   void dispose() {
     _controller.dispose();
     super.dispose();
@@ -135,15 +142,11 @@ class _ImageCanvasState extends State<ImageCanvas> {
       builder: (BuildContext context, BoxConstraints constraints) {
         final Size viewport = constraints.biggest;
 
-        // 首帧、以及窗口尺寸变化时重新摆位。放在 build 里用 post-frame 回调，
-        // 因为此刻正在布局，不能同步 setState。
+        // 首帧、以及窗口尺寸变化时重新摆位。
         if (_viewport != viewport) {
           _viewport = viewport;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              setState(() => _applyMode(viewport));
-            }
-          });
+          // 立即应用变换，不等下一帧 —— 否则首次加载时会看到空白或错位。
+          _applyMode(viewport);
         }
 
         return Stack(
